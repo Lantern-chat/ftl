@@ -4,8 +4,6 @@ version = "0.1.0"
 authors = ["novacrazy <novacrazy@gmail.com>"]
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [dependencies]
 tokio = { version = "1.4", features = ["full"] }
 tokio-util = { version = "0.6", features = ["io"] }
@@ -20,15 +18,20 @@ serde_urlencoded = "0.7"
 percent-encoding = "2.1"
 mime = "0.3.16"
 mime_guess = "2.0.3"
-headers = "0.3"
 url = "2.2.0"
 futures = "0.3"
 tracing = { version = "0.1", default-features = false, features = ["log", "std"] }
 thiserror = "1.0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rmp-serde = "0.15"
+rmp-serde = "1"
 bytes = "1.0.1"
 pin-project = "1"
 either = "1.6.0"
 v_jsonescape = "0.6"
+
+[dependencies.headers]
+version = "0.3"
+
+[patch.crates-io]
+headers = { git = "https://github.com/novacrazy/headers" }
