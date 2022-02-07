@@ -16,15 +16,16 @@ use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::{Reply, Response, Route};
 
-#[pin_project::pin_project]
-#[derive(Debug)]
-struct CompressableBody<S, E>
-where
-    E: StdError,
-    S: Stream<Item = Result<Bytes, E>>,
-{
-    #[pin]
-    body: S,
+pin_project_lite::pin_project! {
+    #[derive(Debug)]
+    struct CompressableBody<S, E>
+    where
+        E: StdError,
+        S: Stream<Item = Result<Bytes, E>>,
+    {
+        #[pin]
+        body: S,
+    }
 }
 
 use std::pin::Pin;
