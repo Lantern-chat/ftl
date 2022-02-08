@@ -35,9 +35,16 @@ where
     let reader = route.aggregate().await?.reader();
 
     Ok(match kind {
+        #[cfg(feature = "json")]
         BodyType::Json => serde_json::from_reader(reader)?,
+
         BodyType::FormUrlEncoded => serde_urlencoded::from_reader(reader)?,
+
+        #[cfg(feature = "msgpack")]
         BodyType::MsgPack => rmp_serde::from_read(reader)?,
+
+        #[allow(unreachable_patterns)]
+        _ => return Err(BodyDeserializeError::IncorrectContentType),
     })
 }
 
@@ -46,12 +53,14 @@ pub enum BodyDeserializeError {
     #[error("{0}")]
     BodyError(#[from] BodyError),
 
+    #[cfg(feature = "json")]
     #[error("JSON Parse Error: {0}")]
     Json(#[from] serde_json::Error),
 
     #[error("Form Parse Error: {0}")]
     Form(#[from] serde_urlencoded::de::Error),
 
+    #[cfg(feature = "msgpack")]
     #[error("MsgPack Parse Error: {0}")]
     MsgPack(#[from] rmp_serde::decode::Error),
 
@@ -59,6 +68,7 @@ pub enum BodyDeserializeError {
     IncorrectContentType,
 }
 
+#[cfg(feature = "json")]
 pub async fn json<T, S>(route: &mut Route<S>) -> Result<T, BodyDeserializeError>
 where
     T: DeserializeOwned,
@@ -113,6 +123,7 @@ where
     Ok(serde_urlencoded::from_reader(body.reader())?)
 }
 
+#[cfg(feature = "msgpack")]
 pub async fn msgpack<T, S>(route: &mut Route<S>) -> Result<T, BodyDeserializeError>
 where
     T: DeserializeOwned,

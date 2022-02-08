@@ -4,10 +4,13 @@ use headers::{ContentType, Header, HeaderMapExt};
 use http::{Response as HttpResponse, StatusCode};
 use hyper::Body;
 
+#[cfg(feature = "json")]
 pub mod json;
-pub mod msgpack;
-
+#[cfg(feature = "json")]
 pub use json::{json, Json};
+
+#[cfg(feature = "msgpack")]
+pub mod msgpack;
 
 pub type Response = HttpResponse<Body>;
 
@@ -52,6 +55,7 @@ where
     }
 }
 
+#[cfg(feature = "either")]
 impl<L, R> Reply for either::Either<L, R>
 where
     L: Reply,

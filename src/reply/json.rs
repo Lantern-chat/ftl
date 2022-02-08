@@ -174,6 +174,7 @@ where
 }
 
 impl Reply for JsonStream {
+    #[inline]
     fn into_response(self) -> Response {
         self.body.with_header(ContentType::json()).into_response()
     }
