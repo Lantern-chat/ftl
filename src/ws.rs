@@ -272,6 +272,7 @@ impl Sink<Message> for WebSocket {
 /// This will likely become a `non-exhaustive` enum in the future, once that
 /// language feature has stabilized.
 #[derive(Eq, PartialEq, Clone)]
+#[repr(transparent)]
 pub struct Message {
     inner: protocol::Message,
 }
@@ -376,6 +377,7 @@ impl Message {
             protocol::Message::Ping(ref v) => v,
             protocol::Message::Pong(ref v) => v,
             protocol::Message::Close(_) => &[],
+            protocol::Message::Frame(ref f) => &f.payload(),
         }
     }
 
