@@ -7,6 +7,10 @@ use serde::de::{Deserialize, DeserializeOwned};
 
 use super::{BodyError, Reply, ReplyError, Response, Route};
 
+lazy_static::lazy_static! {
+    pub(crate) static ref APPLICATION_CBOR: ContentType = ContentType::from("application/cbor".parse::<mime::Mime>().unwrap());
+}
+
 pub async fn any<T, S>(route: &mut Route<S>) -> Result<T, BodyDeserializeError>
 where
     T: DeserializeOwned,
@@ -16,6 +20,7 @@ where
         Json,
         FormUrlEncoded,
         MsgPack,
+        Cbor,
     }
 
     let kind = if let Some(ct) = route.header::<ContentType>() {
@@ -25,6 +30,8 @@ where
             BodyType::FormUrlEncoded
         } else if ct == ContentType::from(mime::APPLICATION_MSGPACK) {
             BodyType::MsgPack
+        } else if ct == *APPLICATION_CBOR {
+            BodyType::Cbor
         } else {
             return Err(BodyDeserializeError::IncorrectContentType);
         }
@@ -42,6 +49,9 @@ where
 
         #[cfg(feature = "msgpack")]
         BodyType::MsgPack => rmp_serde::from_read(reader)?,
+
+        #[cfg(feature = "cbor")]
+        BodyType::Cbor => ciborium::de::from_reader(reader)?,
 
         #[allow(unreachable_patterns)]
         _ => return Err(BodyDeserializeError::IncorrectContentType),
@@ -63,6 +73,10 @@ pub enum BodyDeserializeError {
     #[cfg(feature = "msgpack")]
     #[error("MsgPack Parse Error: {0}")]
     MsgPack(#[from] rmp_serde::decode::Error),
+
+    #[cfg(feature = "cbor")]
+    #[error("CBOR Parse Error: {0}")]
+    Cbor(#[from] ciborium::de::Error<std::io::Error>),
 
     #[error("Content Type Error")]
     IncorrectContentType,
@@ -136,6 +150,21 @@ where
     let body = route.aggregate().await?;
 
     Ok(rmp_serde::from_read(body.reader())?)
+}
+
+#[cfg(feature = "cbor")]
+pub async fn cbor<T, S>(route: &mut Route<S>) -> Result<T, BodyDeserializeError>
+where
+    T: DeserializeOwned,
+{
+    match route.header::<ContentType>() {
+        Some(ct) if ct == *APPLICATION_CBOR => {}
+        _ => return Err(BodyDeserializeError::IncorrectContentType),
+    }
+
+    let body = route.aggregate().await?;
+
+    Ok(ciborium::de::from_reader(body.reader())?)
 }
 
 impl Reply for BodyDeserializeError {

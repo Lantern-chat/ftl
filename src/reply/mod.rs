@@ -12,6 +12,9 @@ pub use json::{json, Json};
 #[cfg(feature = "msgpack")]
 pub mod msgpack;
 
+#[cfg(feature = "cbor")]
+pub mod cbor;
+
 pub type Response = HttpResponse<Body>;
 
 pub trait Reply: Sized {
