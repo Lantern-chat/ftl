@@ -76,35 +76,46 @@ impl FileMetadata for Metadata {
 }
 
 #[async_trait]
-pub trait FileCache {
+pub trait FileCache<S: Send + Sync> {
     type File: GenericFile + EncodedFile;
     type Meta: FileMetadata;
 
-    async fn open(&self, path: &Path, accepts: Option<AcceptEncoding>) -> io::Result<Self::File>;
-    async fn metadata(&self, path: &Path) -> io::Result<Self::Meta>;
-    async fn file_metadata(&self, file: &Self::File) -> io::Result<Self::Meta>;
+    async fn clear(&self, state: &S);
+    async fn open(&self, path: &Path, accepts: Option<AcceptEncoding>, state: &S) -> io::Result<Self::File>;
+    async fn metadata(&self, path: &Path, state: &S) -> io::Result<Self::Meta>;
+    async fn file_metadata(&self, file: &Self::File, state: &S) -> io::Result<Self::Meta>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoCache;
 
 #[async_trait]
-impl FileCache for NoCache {
+impl<S: Send + Sync> FileCache<S> for NoCache {
     type File = TkFile;
     type Meta = Metadata;
 
     #[inline]
-    async fn open(&self, path: &Path, _accepts: Option<AcceptEncoding>) -> io::Result<Self::File> {
+    async fn clear(&self, _state: &S) {
+        // Nothing to do here
+    }
+
+    #[inline]
+    async fn open(
+        &self,
+        path: &Path,
+        _accepts: Option<AcceptEncoding>,
+        _state: &S,
+    ) -> io::Result<Self::File> {
         TkFile::open(path).await
     }
 
     #[inline]
-    async fn metadata(&self, path: &Path) -> io::Result<Self::Meta> {
+    async fn metadata(&self, path: &Path, _state: &S) -> io::Result<Self::Meta> {
         tokio::fs::metadata(path).await
     }
 
     #[inline]
-    async fn file_metadata(&self, file: &Self::File) -> io::Result<Self::Meta> {
+    async fn file_metadata(&self, file: &Self::File, _state: &S) -> io::Result<Self::Meta> {
         file.metadata().await
     }
 }
@@ -210,17 +221,29 @@ pub fn sanitize_path(base: impl AsRef<Path>, tail: &str) -> Result<PathBuf, Sani
 
 const DEFAULT_READ_BUF_SIZE: u64 = 1024 * 32;
 
-pub async fn file<S>(route: &Route<S>, path: impl AsRef<Path>, cache: &impl FileCache) -> impl Reply {
+pub async fn file<S: Send + Sync>(
+    route: &Route<S>,
+    path: impl AsRef<Path>,
+    cache: &impl FileCache<S>,
+) -> impl Reply {
     file_reply(route, path, cache).await
 }
 
-pub async fn dir<S>(route: &Route<S>, base: impl AsRef<Path>, cache: &impl FileCache) -> impl Reply {
+pub async fn dir<S: Send + Sync>(
+    route: &Route<S>,
+    base: impl AsRef<Path>,
+    cache: &impl FileCache<S>,
+) -> impl Reply {
     let mut buf = match sanitize_path(base, route.tail()) {
         Ok(buf) => buf,
         Err(e) => return e.to_string().with_status(StatusCode::BAD_REQUEST).into_response(),
     };
 
-    let is_dir = cache.metadata(&buf).await.map(|m| m.is_dir()).unwrap_or(false);
+    let is_dir = cache
+        .metadata(&buf, &route.state)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
 
     if is_dir {
         log::debug!("dir: appending index.html to directory path");
@@ -230,7 +253,11 @@ pub async fn dir<S>(route: &Route<S>, base: impl AsRef<Path>, cache: &impl FileC
     file_reply(route, buf, cache).await.into_response()
 }
 
-async fn file_reply<S>(route: &Route<S>, path: impl AsRef<Path>, cache: &impl FileCache) -> impl Reply {
+async fn file_reply<S: Send + Sync>(
+    route: &Route<S>,
+    path: impl AsRef<Path>,
+    cache: &impl FileCache<S>,
+) -> impl Reply {
     let path = path.as_ref();
 
     let range = route.header::<headers::Range>();
@@ -241,7 +268,7 @@ async fn file_reply<S>(route: &Route<S>, path: impl AsRef<Path>, cache: &impl Fi
         Some(_) => None,
     };
 
-    let file = match cache.open(path, accepts).await {
+    let file = match cache.open(path, accepts, &route.state).await {
         Ok(f) => f,
         Err(e) => {
             return match e.kind() {
@@ -252,7 +279,7 @@ async fn file_reply<S>(route: &Route<S>, path: impl AsRef<Path>, cache: &impl Fi
         }
     };
 
-    let metadata = match cache.file_metadata(&file).await {
+    let metadata = match cache.file_metadata(&file, &route.state).await {
         Ok(m) => m,
         Err(e) => {
             log::error!("Error retreiving file metadata: {e}");
