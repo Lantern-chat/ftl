@@ -67,10 +67,11 @@ impl From<Response> for CompressionProps {
     }
 }
 
-pub async fn wrap_route<S, R, F>(enable: bool, route: Route<S>, r: R) -> Response
+pub async fn wrap_route<S, T, F, R>(enable: bool, route: Route<S>, r: T) -> Response
 where
-    R: FnOnce(Route<S>) -> F,
-    F: Future<Output = Response>,
+    T: FnOnce(Route<S>) -> F,
+    F: Future<Output = R>,
+    R: Reply,
 {
     use headers::{ContentCoding, ContentLength, HeaderMapExt};
 
@@ -78,7 +79,7 @@ where
         .header::<headers::AcceptEncoding>()
         .and_then(|h| h.prefered_encoding());
 
-    let resp = r(route).await;
+    let resp = r(route).await.into_response();
 
     match encoding {
         // skip compressing error responses, don't waste time on these
@@ -102,11 +103,7 @@ where
 
             let reader = StreamReader::new(props.body);
 
-            const LEVEL: Level = if cfg!(debug_assertions) {
-                Level::Fastest
-            } else {
-                Level::Default
-            };
+            const LEVEL: Level = if cfg!(debug_assertions) { Level::Fastest } else { Level::Default };
 
             match encoding {
                 ContentCoding::BROTLI => Response::from_parts(
