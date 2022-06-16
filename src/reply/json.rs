@@ -8,16 +8,16 @@ pub struct Json {
     inner: Result<Bytes, ()>,
 }
 
-pub fn try_json<T: serde::Serialize>(value: &T) -> Result<Json, serde_json::Error> {
+pub fn try_json<T: serde::Serialize>(value: T) -> Result<Json, serde_json::Error> {
     Ok(Json {
-        inner: match serde_json::to_vec(value) {
+        inner: match serde_json::to_vec(&value) {
             Ok(v) => Ok(Bytes::from(v)),
             Err(e) => return Err(e),
         },
     })
 }
 
-pub fn json<T: serde::Serialize>(value: &T) -> Json {
+pub fn json<T: serde::Serialize>(value: T) -> Json {
     match try_json(value) {
         Ok(resp) => resp,
         Err(e) => {
