@@ -192,9 +192,8 @@ pub enum SanitizeError {
     Utf8Error(#[from] std::str::Utf8Error),
 }
 
-pub fn sanitize_path(base: impl AsRef<Path>, tail: &str) -> Result<PathBuf, SanitizeError> {
-    let base = base.as_ref();
-    let mut buf = base.to_path_buf();
+pub fn sanitize_path(base: impl Into<PathBuf>, tail: &str) -> Result<PathBuf, SanitizeError> {
+    let mut buf = base.into();
     let p = percent_decode_str(tail).decode_utf8()?;
 
     for seg in p.split('/') {
@@ -231,7 +230,7 @@ pub async fn file<S: Send + Sync>(
 
 pub async fn dir<S: Send + Sync>(
     route: &Route<S>,
-    base: impl AsRef<Path>,
+    base: impl Into<PathBuf>,
     cache: &impl FileCache<S>,
 ) -> impl Reply {
     let mut buf = match sanitize_path(base, route.tail()) {
