@@ -187,7 +187,7 @@ impl<S> Route<S> {
     /// Finds the next segment in the URI path, storing the result internally for further usage.
     ///
     /// Use [`.segment()`], [`.method_segment()`] or [`param`] to parse the segment found (if any)
-    pub fn next(&mut self) -> &mut Self {
+    pub fn next_mut(&mut self) -> &mut Self {
         self.segment_index = self.next_segment_index;
 
         let path = self.req.uri().path();
@@ -210,6 +210,11 @@ impl<S> Route<S> {
         self.next_segment_index = self.segment_index + segment.len();
 
         self
+    }
+
+    /// Same as [`.next_mut()`] but without the `mut`
+    pub fn next(&mut self) -> &Self {
+        self.next_mut()
     }
 
     pub fn body(&self) -> &Body {
