@@ -207,6 +207,11 @@ pub fn sanitize_path(base: impl Into<PathBuf>, tail: &str) -> Result<PathBuf, Sa
             return Err(SanitizeError::InvalidPath);
         }
 
+        if cfg!(windows) && seg.contains(':') {
+            log::warn!("dir: rejecting segment containing colon (:)");
+            return Err(SanitizeError::InvalidPath);
+        }
+
         buf.push(seg);
     }
 
