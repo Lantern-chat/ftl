@@ -81,10 +81,12 @@ where
 
     let resp = r(route).await.into_response();
 
-    match encoding {
-        // skip compressing error responses, don't waste time on these
-        _ if !enable || !resp.status().is_success() || resp.status() == StatusCode::NO_CONTENT => resp,
+    // skip compressing error responses, don't waste time on these
+    if !enable || !resp.status().is_success() || resp.status() == StatusCode::NO_CONTENT {
+        return resp;
+    }
 
+    match encoding {
         // COMPRESS method is unsupported (and never used in practice anyway)
         None | Some(ContentCoding::IDENTITY) | Some(ContentCoding::COMPRESS) => resp,
 
@@ -105,24 +107,21 @@ where
 
             const LEVEL: Level = if cfg!(debug_assertions) { Level::Fastest } else { Level::Default };
 
-            match encoding {
-                ContentCoding::BROTLI => Response::from_parts(
-                    props.head,
-                    Body::wrap_stream(ReaderStream::new(BrotliEncoder::with_quality(
-                        reader,
-                        Level::Fastest,
-                    ))),
-                ),
-                ContentCoding::GZIP => Response::from_parts(
-                    props.head,
-                    Body::wrap_stream(ReaderStream::new(GzipEncoder::with_quality(reader, LEVEL))),
-                ),
-                ContentCoding::DEFLATE => Response::from_parts(
-                    props.head,
-                    Body::wrap_stream(ReaderStream::new(DeflateEncoder::with_quality(reader, LEVEL))),
-                ),
+            let body = match encoding {
+                ContentCoding::BROTLI => Body::wrap_stream(ReaderStream::new(BrotliEncoder::with_quality(
+                    reader,
+                    Level::Fastest,
+                ))),
+                ContentCoding::GZIP => {
+                    Body::wrap_stream(ReaderStream::new(GzipEncoder::with_quality(reader, LEVEL)))
+                }
+                ContentCoding::DEFLATE => {
+                    Body::wrap_stream(ReaderStream::new(DeflateEncoder::with_quality(reader, LEVEL)))
+                }
                 _ => unreachable!(),
-            }
+            };
+
+            Response::from_parts(props.head, body)
         }
     }
 }
