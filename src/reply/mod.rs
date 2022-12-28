@@ -4,6 +4,8 @@ use headers::{ContentType, Header, HeaderMapExt};
 use http::{Response as HttpResponse, StatusCode};
 use hyper::Body;
 
+pub mod deferred;
+
 #[cfg(feature = "json")]
 pub mod json;
 #[cfg(feature = "json")]

@@ -21,3 +21,5 @@ pub use self::route::{
     BodyError, Route,
     Segment::{self, End, Exact},
 };
+
+pub use body::APPLICATION_CBOR;

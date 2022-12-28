@@ -8,7 +8,7 @@ use serde::de::{Deserialize, DeserializeOwned};
 use super::{BodyError, Reply, ReplyError, Response, Route};
 
 lazy_static::lazy_static! {
-    pub(crate) static ref APPLICATION_CBOR: ContentType = ContentType::from("application/cbor".parse::<mime::Mime>().unwrap());
+    pub static ref APPLICATION_CBOR: ContentType = ContentType::from("application/cbor".parse::<mime::Mime>().unwrap());
 }
 
 pub async fn any<T, S>(route: &mut Route<S>) -> Result<T, BodyDeserializeError>
