@@ -1,13 +1,13 @@
 use super::*;
 
-pub struct DeferredValue(Box<dyn IndirectSerialize + 'static>);
+pub struct DeferredValue(Box<dyn IndirectSerialize + Send + 'static>);
 pub struct DeferredStream(Box<dyn IndirectStream + Send + 'static>);
 
 impl DeferredValue {
     #[inline]
     pub fn new<T>(value: T) -> Self
     where
-        T: serde::Serialize + 'static,
+        T: serde::Serialize + Send + 'static,
     {
         DeferredValue(Box::new(value))
     }
