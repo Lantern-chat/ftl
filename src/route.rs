@@ -8,7 +8,12 @@ use std::{
 use bytes::{Buf, Bytes};
 use futures::Stream;
 use headers::{Header, HeaderMapExt, HeaderValue};
-use http::{header::ToStrError, method::InvalidMethod, uri::Authority, Method};
+use http::{
+    header::{AsHeaderName, HeaderName, ToStrError},
+    method::InvalidMethod,
+    uri::Authority,
+    Method,
+};
 use hyper::{
     body::{aggregate, HttpBody},
     Body, Request, Response,
@@ -62,7 +67,7 @@ impl<S> Route<S> {
     ///
     /// This is sometimes used in old browsers without support for PATCH or OPTIONS methods.
     pub fn apply_method_override(&mut self) -> Result<(), InvalidMethod> {
-        if let Some(method_override) = self.req.headers().get("x-http-method-override") {
+        if let Some(method_override) = self.raw_header(HeaderName::from_static("x-http-method-override")) {
             *self.req.method_mut() = Method::from_bytes(method_override.as_bytes())?;
         }
 
@@ -76,7 +81,7 @@ impl<S> Route<S> {
     pub fn host(&self) -> Option<Authority> {
         let from_uri = self.req.uri().authority();
 
-        let from_header = match self.parse_raw_header::<Authority>("host") {
+        let from_header = match self.parse_raw_header::<Authority, _>(HeaderName::from_static("host")) {
             Some(Ok(Ok(host))) => Some(host),
             _ => None,
         };
@@ -156,13 +161,16 @@ impl<S> Route<S> {
     }
 
     #[inline]
-    pub fn raw_header(&self, name: &str) -> Option<&HeaderValue> {
+    pub fn raw_header<K: AsHeaderName>(&self, name: K) -> Option<&HeaderValue> {
         self.req.headers().get(name)
     }
 
     /// Parse a header value using `FromStr`
     #[inline]
-    pub fn parse_raw_header<T: FromStr>(&self, name: &str) -> Option<Result<Result<T, T::Err>, ToStrError>> {
+    pub fn parse_raw_header<T: FromStr, K: AsHeaderName>(
+        &self,
+        name: K,
+    ) -> Option<Result<Result<T, T::Err>, ToStrError>> {
         self.raw_header(name)
             .map(|header| header.to_str().map(FromStr::from_str))
     }
@@ -178,10 +186,11 @@ impl<S> Route<S> {
     pub fn forwarded_for<'a>(
         &'a self,
     ) -> Option<Result<impl Iterator<Item = Result<IpAddr, AddrParseError>> + 'a, ToStrError>> {
-        self.req.headers().get("x-forwarded-for").map(|ff| {
-            ff.to_str()
-                .map(|ff| ff.split(',').map(|segment| IpAddr::from_str(segment.trim())))
-        })
+        self.raw_header(HeaderName::from_static("x-forwarded-for"))
+            .map(|ff| {
+                ff.to_str()
+                    .map(|ff| ff.split(',').map(|segment| IpAddr::from_str(segment.trim())))
+            })
     }
 
     /// Finds the next segment in the URI path, storing the result internally for further usage.
