@@ -9,6 +9,7 @@ default = ["json", "cbor"]
 json = ["serde_json", "v_jsonescape"]
 msgpack = ["rmp-serde"]
 cbor = ["ciborium"]
+brotli = ["async-compression/brotli"]
 
 [dependencies]
 tokio = { version = "1.4", features = ["full"] }
@@ -18,7 +19,7 @@ async-trait = "0.1.50"
 hyper = { version = "0.14.4", features = ["http1", "http2", "server", "stream", "runtime"] }
 tokio-tungstenite = "0.18"
 http = "0.2.3"
-async-compression = { version = "0.3.7", features = ["brotli", "deflate", "gzip", "tokio"] }
+async-compression = { version = "0.3.7", features = ["deflate", "gzip", "tokio"] }
 multipart = { version = "0.18.0", default-features = false, features = ["server"] }
 serde = { version = "1", features = ["derive"] }
 serde_urlencoded = "0.7"

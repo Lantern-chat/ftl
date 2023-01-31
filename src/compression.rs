@@ -3,8 +3,11 @@ use std::error::Error as StdError;
 use bytes::Bytes;
 use futures::{Future, Stream};
 
+#[cfg(feature = "brotli")]
+use async_compression::tokio::bufread::BrotliEncoder;
+
 use async_compression::{
-    tokio::bufread::{BrotliEncoder, DeflateEncoder, GzipEncoder},
+    tokio::bufread::{DeflateEncoder, GzipEncoder},
     Level,
 };
 use http::{header::HeaderValue, StatusCode};
@@ -90,6 +93,9 @@ where
         // COMPRESS method is unsupported (and never used in practice anyway)
         None | Some(ContentCoding::IDENTITY) | Some(ContentCoding::COMPRESS) => resp,
 
+        #[cfg(not(feature = "brotli"))]
+        Some(ContentCoding::BROTLI) => resp,
+
         Some(encoding) => {
             let mut props = CompressionProps::from(resp);
 
@@ -105,20 +111,24 @@ where
 
             let reader = StreamReader::new(props.body);
 
-            const LEVEL: Level = if cfg!(debug_assertions) { Level::Fastest } else { Level::Default };
-
             let body = match encoding {
+                #[cfg(feature = "brotli")]
                 ContentCoding::BROTLI => Body::wrap_stream(ReaderStream::new(BrotliEncoder::with_quality(
                     reader,
-                    Level::Fastest,
+                    if cfg!(debug_assertions) { Level::Fastest } else { Level::Precise(2) },
                 ))),
-                ContentCoding::GZIP => {
-                    Body::wrap_stream(ReaderStream::new(GzipEncoder::with_quality(reader, LEVEL)))
-                }
-                ContentCoding::DEFLATE => {
-                    Body::wrap_stream(ReaderStream::new(DeflateEncoder::with_quality(reader, LEVEL)))
-                }
-                _ => unreachable!(),
+                ContentCoding::GZIP => Body::wrap_stream(ReaderStream::new(GzipEncoder::with_quality(
+                    reader,
+                    if cfg!(debug_assertions) { Level::Fastest } else { Level::Default },
+                ))),
+                ContentCoding::DEFLATE => Body::wrap_stream(ReaderStream::new(DeflateEncoder::with_quality(
+                    reader,
+                    if cfg!(debug_assertions) { Level::Fastest } else { Level::Default },
+                ))),
+                ContentCoding::IDENTITY | ContentCoding::COMPRESS => unreachable!(),
+
+                #[cfg(not(feature = "brotli"))]
+                ContentCoding::BROTLI => unreachable!(),
             };
 
             Response::from_parts(props.head, body)
