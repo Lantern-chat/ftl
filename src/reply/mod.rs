@@ -113,7 +113,7 @@ impl<R: Reply> Reply for WithStatus<R> {
         let mut res = self.reply.into_response();
 
         // Don't override server errors with non-server errors
-        if !(res.status().is_server_error() && !self.status.is_server_error()) {
+        if !res.status().is_server_error() || self.status.is_server_error() {
             *res.status_mut() = self.status;
         }
 

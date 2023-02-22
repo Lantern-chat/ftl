@@ -42,6 +42,10 @@ pub trait FileMetadata {
     fn len(&self) -> u64;
     fn modified(&self) -> io::Result<SystemTime>;
     fn blksize(&self) -> u64;
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 impl FileMetadata for Metadata {

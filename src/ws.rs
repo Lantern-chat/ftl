@@ -111,7 +111,7 @@ impl Ws {
         let on_upgrade = route.req.extensions_mut().remove::<OnUpgrade>();
 
         Ok(Ws {
-            config: config.unwrap_or_else(|| WebSocketConfig::default()),
+            config: config.unwrap_or_default(),
             key,
             on_upgrade,
         })

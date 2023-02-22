@@ -8,12 +8,14 @@ extern crate tracing as log;
 pub mod body;
 pub mod compression;
 pub mod fs;
-pub mod multipart;
 pub mod rate_limit;
 pub mod real_ip;
 pub mod reply;
 pub mod route;
 pub mod ws;
+
+#[cfg(feature = "multipart")]
+pub mod multipart;
 
 pub use http::{Method, StatusCode};
 
