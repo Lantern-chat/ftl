@@ -50,7 +50,7 @@ where
     let (mut sender, body) = Body::channel();
 
     tokio::spawn(async move {
-        futures::pin_mut!(stream);
+        let mut stream = std::pin::pin!(stream);
 
         let mut first = true;
         let mut buffer = String::with_capacity(128);
@@ -123,7 +123,7 @@ where
     let (mut sender, body) = Body::channel();
 
     tokio::spawn(async move {
-        futures::pin_mut!(stream);
+        let mut stream = std::pin::pin!(stream);
 
         let mut first = true;
         let mut buffer = Vec::with_capacity(128);
