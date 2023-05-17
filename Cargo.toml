@@ -17,9 +17,9 @@ tokio-util = { version = "0.7", features = ["io"] }
 # tokio-stream = { version = "0.1", features = ["sync"] }
 async-trait = "0.1.50"
 hyper = { version = "0.14.4", features = ["http1", "http2", "server", "stream", "runtime"] }
-tokio-tungstenite = "0.18"
+tokio-tungstenite = "0.19"
 http = "0.2.3"
-async-compression = { version = "0.3.7", features = ["deflate", "gzip", "tokio"] }
+async-compression = { version = "0.4", features = ["deflate", "gzip", "tokio"] }
 multipart = { optional = true, version = "0.18.0", default-features = false, features = ["server"] }
 serde = { version = "1", features = ["derive"] }
 serde_urlencoded = "0.7"
