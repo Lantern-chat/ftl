@@ -1,43 +1,104 @@
-use std::time::Instant;
+use std::{
+    borrow::Borrow,
+    hash::Hash,
+    num::NonZeroU64,
+    time::{Duration, Instant},
+};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct RateLimiter {
-    pub count: f32,
-    pub last: Instant,
+use scc::hash_map::{Entry, HashMap};
+
+pub struct RateLimiter<K: Eq + Hash> {
+    start: Instant,
+    limits: HashMap<K, Gcra>,
 }
 
-#[derive(Debug)]
-pub struct RateLimitError {
-    pub limit: f32,
-}
+impl<K: Eq + Hash> RateLimiter<K> {
+    fn relative(&self, ts: Instant) -> u64 {
+        ts.checked_duration_since(self.start)
+            .unwrap_or_default()
+            .as_nanos() as u64
+    }
 
-impl Default for RateLimiter {
-    fn default() -> Self {
-        RateLimiter {
-            count: 0.0,
-            last: Instant::now(),
+    pub async fn clean(&self, before: Instant) {
+        let before = self.relative(before);
+        self.limits.retain_async(move |_, v| v.0 >= before).await;
+    }
+
+    pub async fn req(&self, key: K, quota: Quota, now: Instant) -> Result<(), RateLimitError> {
+        let now = self.relative(now);
+
+        match self.limits.entry_async(key).await {
+            Entry::Occupied(mut gcra) => gcra.get_mut().req(quota, now),
+            Entry::Vacant(gcra) => {
+                gcra.insert_entry(Gcra::first(quota, now));
+                Ok(())
+            }
         }
     }
 }
 
-use crate::Route;
-
-impl RateLimiter {
-    /// Update this limiter. Will return true if within limits.
-    pub fn update<S>(&mut self, route: &Route<S>, req_per_sec: f32) -> Result<(), RateLimitError> {
-        // get the number of "decayed" requests since the last request
-        let decayed = route.start.duration_since(self.last).as_millis() as f32 * (req_per_sec * 0.001);
-        // compute the effective number of requests performed
-        let req_count = self.count - decayed;
-
-        if req_count < req_per_sec {
-            // update with new request
-            self.count = req_count.max(0.0) + 1.0;
-            self.last = route.start;
-
-            Ok(())
-        } else {
-            Err(RateLimitError { limit: req_per_sec })
+impl<K: Eq + Hash> Default for RateLimiter<K> {
+    fn default() -> Self {
+        RateLimiter {
+            start: Instant::now(),
+            limits: HashMap::new(),
         }
+    }
+}
+
+#[derive(Debug)]
+#[repr(transparent)]
+pub struct RateLimitError(NonZeroU64);
+
+impl RateLimitError {
+    pub const fn as_duration(&self) -> Duration {
+        Duration::from_nanos(self.0.get())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Quota {
+    tau: u64,
+    t: u64,
+}
+
+impl Quota {
+    /// Constructs a new quota with the given number of burst requests and
+    /// an `emission_interval` parameter, which is the amount of time it takes
+    /// for the limit to release.
+    ///
+    /// For example, 100reqs/second would have an emission_interval of 10ms
+    ///
+    /// Burst requests ignore the individual emission interval in favor of
+    /// delivering all at once or in quick succession, up until the provided limit.
+    #[rustfmt::skip]
+    pub const fn new(emission_interval: Duration, burst: NonZeroU64) -> Quota {
+        let t = emission_interval.as_nanos() as u64;
+        Quota { t, tau: t * burst.get() }
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct Gcra(u64);
+
+impl Gcra {
+    #[inline]
+    pub const fn first(Quota { t, .. }: Quota, now: u64) -> Gcra {
+        // Equivalent to `Gcra(now + t).req()` to calculate the first request
+        Gcra(now + t + t)
+    }
+
+    #[inline]
+    pub fn req(&mut self, Quota { tau, t }: Quota, now: u64) -> Result<(), RateLimitError> {
+        let next = self.0.saturating_sub(tau);
+        if now < next {
+            // SAFETY: next > now, so next - now is non-zero
+            return Err(RateLimitError(unsafe { NonZeroU64::new_unchecked(next - now) }));
+        }
+
+        self.0 = now.max(self.0) + t;
+
+        Ok(())
     }
 }
