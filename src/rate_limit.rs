@@ -1,18 +1,19 @@
 use std::{
     borrow::Borrow,
-    hash::Hash,
+    hash::{BuildHasher, Hash},
     num::NonZeroU64,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, Instant},
 };
 
 use scc::hash_map::{Entry, HashMap};
 
-pub struct RateLimiter<K: Eq + Hash> {
+pub struct RateLimiter<K: Eq + Hash, H: BuildHasher = std::collections::hash_map::RandomState> {
     start: Instant,
-    limits: HashMap<K, Gcra>,
+    limits: HashMap<K, Gcra, H>,
 }
 
-impl<K: Eq + Hash> RateLimiter<K> {
+impl<K: Eq + Hash, H: BuildHasher> RateLimiter<K, H> {
     fn relative(&self, ts: Instant) -> u64 {
         ts.checked_duration_since(self.start)
             .unwrap_or_default()
@@ -21,27 +22,36 @@ impl<K: Eq + Hash> RateLimiter<K> {
 
     pub async fn clean(&self, before: Instant) {
         let before = self.relative(before);
-        self.limits.retain_async(move |_, v| v.0 >= before).await;
+        self.limits
+            .retain_async(move |_, v| *AtomicU64::get_mut(&mut v.0) >= before)
+            .await;
     }
 
     pub async fn req(&self, key: K, quota: Quota, now: Instant) -> Result<(), RateLimitError> {
         let now = self.relative(now);
 
-        match self.limits.entry_async(key).await {
-            Entry::Occupied(mut gcra) => gcra.get_mut().req(quota, now),
-            Entry::Vacant(gcra) => {
-                gcra.insert_entry(Gcra::first(quota, now));
-                Ok(())
-            }
-        }
+        let Some(res) = self.limits.read_async(&key, |_, gcra| gcra.req(quota, now)).await else {
+            return match self.limits.entry_async(key).await {
+                Entry::Occupied(gcra) => gcra.get().req(quota, now),
+                Entry::Vacant(gcra) => {
+                    gcra.insert_entry(Gcra::first(quota, now));
+                    Ok(())
+                }
+            };
+        };
+
+        res
     }
 }
 
-impl<K: Eq + Hash> Default for RateLimiter<K> {
+impl<K: Eq + Hash, H: BuildHasher> Default for RateLimiter<K, H>
+where
+    H: Default,
+{
     fn default() -> Self {
         RateLimiter {
             start: Instant::now(),
-            limits: HashMap::new(),
+            limits: HashMap::default(),
         }
     }
 }
@@ -78,27 +88,41 @@ impl Quota {
     }
 }
 
-#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 #[repr(transparent)]
-pub struct Gcra(u64);
+pub struct Gcra(AtomicU64);
 
 impl Gcra {
     #[inline]
     pub const fn first(Quota { t, .. }: Quota, now: u64) -> Gcra {
         // Equivalent to `Gcra(now + t).req()` to calculate the first request
-        Gcra(now + t + t)
+        Gcra(AtomicU64::new(now + t + t))
     }
 
-    #[inline]
-    pub fn req(&mut self, Quota { tau, t }: Quota, now: u64) -> Result<(), RateLimitError> {
-        let next = self.0.saturating_sub(tau);
+    fn decide(prev: u64, now: u64, Quota { tau, t }: Quota) -> Result<u64, RateLimitError> {
+        let next = prev.saturating_sub(tau);
         if now < next {
             // SAFETY: next > now, so next - now is non-zero
-            return Err(RateLimitError(unsafe { NonZeroU64::new_unchecked(next - now) }));
+            Err(RateLimitError(unsafe { NonZeroU64::new_unchecked(next - now) }))
+        } else {
+            Ok(now.max(prev) + t)
+        }
+    }
+
+    #[rustfmt::skip]
+    pub fn req(&self, quota: Quota, now: u64) -> Result<(), RateLimitError> {
+        let mut prev = self.0.load(Ordering::Acquire);
+        let mut decision = Self::decide(prev, now, quota);
+
+        while let Ok(next) = decision {
+            match self.0.compare_exchange_weak(prev, next, Ordering::Release, Ordering::Relaxed) {
+                Ok(_) => return Ok(()),
+                Err(next_prev) => prev = next_prev,
+            }
+
+            decision = Self::decide(prev, now, quota);
         }
 
-        self.0 = now.max(self.0) + t;
-
-        Ok(())
+        decision.map(|_| ())
     }
 }
