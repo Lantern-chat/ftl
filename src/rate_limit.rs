@@ -15,9 +15,7 @@ pub struct RateLimiter<K: Eq + Hash, H: BuildHasher = std::collections::hash_map
 
 impl<K: Eq + Hash, H: BuildHasher> RateLimiter<K, H> {
     fn relative(&self, ts: Instant) -> u64 {
-        ts.checked_duration_since(self.start)
-            .unwrap_or_default()
-            .as_nanos() as u64
+        ts.saturating_duration_since(self.start).as_nanos() as u64
     }
 
     pub async fn clean(&self, before: Instant) {
@@ -56,12 +54,12 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 #[repr(transparent)]
 pub struct RateLimitError(NonZeroU64);
 
 impl RateLimitError {
-    pub const fn as_duration(&self) -> Duration {
+    pub const fn as_duration(self) -> Duration {
         Duration::from_nanos(self.0.get())
     }
 }
