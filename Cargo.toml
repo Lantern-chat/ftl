@@ -17,7 +17,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 # tokio-stream = { version = "0.1", features = ["sync"] }
 async-trait = "0.1.50"
 hyper = { version = "0.14.4", features = ["http1", "http2", "server", "stream", "runtime"] }
-tokio-tungstenite = "0.19"
+tokio-tungstenite = "0.20"
 http = "0.2.3"
 async-compression = { version = "0.4", features = ["deflate", "gzip", "tokio"] }
 multipart = { optional = true, version = "0.18.0", default-features = false, features = ["server"] }
@@ -33,7 +33,7 @@ thiserror = "1.0.23"
 bytes = "1.0.1"
 pin-project-lite = "0.2.8"
 lazy_static = "1.4.0"
-scc = "1.9"
+scc = "2.0"
 
 either = { version = "1.6.0", optional = true }
 

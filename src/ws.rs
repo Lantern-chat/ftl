@@ -117,9 +117,15 @@ impl Ws {
         })
     }
 
-    /// Set the size of the internal message send queue.
-    pub fn max_send_queue(mut self, max: usize) -> Self {
-        self.config.max_send_queue = Some(max);
+    /// See [WebSocketConfig]
+    pub fn write_buffer_size(mut self, size: usize) -> Self {
+        self.config.write_buffer_size = size;
+        self
+    }
+
+    /// See [WebSocketConfig]
+    pub fn max_write_buffer_size(mut self, max: usize) -> Self {
+        self.config.max_write_buffer_size = max;
         self
     }
 
