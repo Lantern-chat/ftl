@@ -1,3 +1,4 @@
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use std::{fs::Metadata, io, time::Instant};
@@ -11,13 +12,13 @@ use headers::{
     HeaderMap, HeaderMapExt, HeaderValue, IfModifiedSince, IfRange, IfUnmodifiedSince, LastModified, Range,
     TransferEncoding,
 };
-use http::{header::TRAILER, Method, Response, StatusCode};
-use hyper::Body;
+use http::{header::TRAILER, Method, StatusCode};
+use hyper::body::Frame;
 use percent_encoding::percent_decode_str;
 
-use super::{Reply, Route};
+use crate::body::{Body, BodySender, Response};
 
-use async_trait::async_trait;
+use super::{Reply, Route};
 
 // TODO: https://github.com/magiclen/entity-tag/blob/master/src/lib.rs
 // https://github.com/pillarjs/send/blob/master/index.js
@@ -79,21 +80,35 @@ impl FileMetadata for Metadata {
     }
 }
 
-#[async_trait]
 pub trait FileCache<S: Send + Sync> {
     type File: GenericFile + EncodedFile;
     type Meta: FileMetadata;
 
-    async fn clear(&self, state: &S);
-    async fn open(&self, path: &Path, accepts: Option<AcceptEncoding>, state: &S) -> io::Result<Self::File>;
-    async fn metadata(&self, path: &Path, state: &S) -> io::Result<Self::Meta>;
-    async fn file_metadata(&self, file: &Self::File, state: &S) -> io::Result<Self::Meta>;
+    /// Clear the file cache, unload all files
+    fn clear(&self, state: &S) -> impl Future<Output = ()> + Send;
+
+    /// Open a file and return it
+    fn open(
+        &self,
+        path: &Path,
+        accepts: Option<AcceptEncoding>,
+        state: &S,
+    ) -> impl Future<Output = io::Result<Self::File>> + Send;
+
+    /// Retrieve the file's metadata from path
+    fn metadata(&self, path: &Path, state: &S) -> impl Future<Output = io::Result<Self::Meta>> + Send;
+
+    /// Retrieve the file's metadata from an already opened file
+    fn file_metadata(
+        &self,
+        file: &Self::File,
+        state: &S,
+    ) -> impl Future<Output = io::Result<Self::Meta>> + Send;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NoCache;
 
-#[async_trait]
 impl<S: Send + Sync> FileCache<S> for NoCache {
     type File = TkFile;
     type Meta = Metadata;
@@ -133,13 +148,13 @@ pub struct Conditionals {
 }
 
 pub enum Cond {
-    NoBody(Response<Body>),
+    NoBody(StatusCode),
     WithBody(Option<Range>),
 }
 
 impl Conditionals {
     pub fn new<S>(route: &Route<S>, range: Option<Range>) -> Conditionals {
-        let req_headers = route.req.headers();
+        let req_headers = route.headers();
         Conditionals {
             range,
             if_modified_since: req_headers.typed_get(),
@@ -157,7 +172,7 @@ impl Conditionals {
             log::trace!("if-unmodified-since? {since:?} vs {last_modified:?} = {precondition}",);
 
             if !precondition {
-                return Cond::NoBody(StatusCode::PRECONDITION_FAILED.into_response());
+                return Cond::NoBody(StatusCode::PRECONDITION_FAILED);
             }
         }
 
@@ -170,7 +185,7 @@ impl Conditionals {
                 .unwrap_or(false);
 
             if unmodified {
-                return Cond::NoBody(StatusCode::NOT_MODIFIED.into_response());
+                return Cond::NoBody(StatusCode::NOT_MODIFIED);
             }
         }
 
@@ -306,7 +321,7 @@ async fn file_reply<S: Send + Sync>(
     let mut len = metadata.len();
 
     match conditionals.check(modified) {
-        Cond::NoBody(resp) => resp,
+        Cond::NoBody(resp) => resp.into_response(),
         Cond::WithBody(range) => match bytes_range(range, len) {
             Err(_) => StatusCode::RANGE_NOT_SATISFIABLE
                 .with_header(ContentRange::unsatisfied_bytes(len))
@@ -364,7 +379,7 @@ pub struct BadRange;
 pub fn bytes_range(range: Option<Range>, max_len: u64) -> Result<(u64, u64), BadRange> {
     use std::ops::Bound;
 
-    match range.and_then(|r| r.iter().next()) {
+    match range.and_then(|r| r.satisfiable_ranges(max_len).next()) {
         Some((start, end)) => {
             let start = match start {
                 Bound::Unbounded => 0,
@@ -389,7 +404,8 @@ pub fn bytes_range(range: Option<Range>, max_len: u64) -> Result<(u64, u64), Bad
     }
 }
 
-use futures::Stream;
+use futures::channel::mpsc;
+use futures::{SinkExt, Stream, StreamExt};
 use std::io::SeekFrom;
 
 use std::pin::Pin;
@@ -402,13 +418,16 @@ fn file_body(
 ) -> Body {
     //return Body::wrap_stream(file_stream(file, buf_size, (start, end)));
 
-    let (mut sender, body) = Body::channel();
+    let (body, tx) = Body::channel(16);
 
     tokio::spawn(async move {
         if start != 0 {
             if let Err(e) = file.seek(SeekFrom::Start(start)).await {
                 log::error!("Error seeking file: {e}");
-                return sender.abort();
+                if !tx.abort().await {
+                    log::error!("Unable to abort stream");
+                }
+                return;
             }
         }
 
@@ -425,7 +444,10 @@ fn file_body(
                 Ok(n) => n as u64,
                 Err(err) => {
                     log::debug!("file read error: {err}");
-                    return sender.abort();
+                    if !tx.abort().await {
+                        log::error!("Unable to abort stream");
+                    }
+                    return;
                 }
             };
 
@@ -442,9 +464,12 @@ fn file_body(
                 len -= n;
             }
 
-            if let Err(e) = sender.send_data(chunk).await {
+            if let Err(e) = tx.send(Ok(Frame::data(chunk))).await {
                 log::trace!("Error sending file chunk: {e}");
-                return sender.abort();
+                if !tx.abort().await {
+                    log::error!("Unable to abort stream");
+                }
+                return;
             }
         }
 
@@ -456,14 +481,12 @@ fn file_body(
         if let Ok(value) = HeaderValue::from_str(&format!("end;dur={:.4}", elapsed)) {
             trailers.insert("Server-Timing", value);
 
-            if let Err(e) = sender.send_trailers(trailers).await {
+            if let Err(e) = tx.send(Ok(Frame::trailers(trailers))).await {
                 log::trace!("Error sending trailers: {e}");
             }
         } else {
             log::trace!("Unable to create trailer value");
         }
-
-        drop(sender);
     });
 
     body

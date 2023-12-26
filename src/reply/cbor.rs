@@ -1,11 +1,12 @@
 use std::mem::size_of_val;
 
-use crate::APPLICATION_CBOR;
+use crate::{body::BodySender, error::DynError, APPLICATION_CBOR};
 
 use super::*;
 
 use bytes::Bytes;
-use futures::{Stream, StreamExt};
+use futures::{SinkExt, Stream, StreamExt};
+use hyper::body::Frame;
 
 #[derive(Clone)]
 pub struct Cbor {
@@ -36,11 +37,13 @@ pub fn cbor<T: serde::Serialize>(value: T) -> Cbor {
 impl Reply for Cbor {
     fn into_response(self) -> Response {
         match self.inner {
-            Ok(body) => Body::from(body)
+            Ok(body) => Response::new(Body::from(body))
                 .with_header(crate::body::APPLICATION_CBOR.clone())
                 .into_response(),
 
-            Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            Err(()) => Response::new(Body::Empty)
+                .with_status(StatusCode::INTERNAL_SERVER_ERROR)
+                .into_response(),
         }
     }
 }
@@ -52,15 +55,15 @@ pub struct CborStream {
 pub fn array_stream<T, E>(stream: impl Stream<Item = Result<T, E>> + Send + 'static) -> impl Reply
 where
     T: serde::Serialize + Send + Sync + 'static,
-    E: Into<Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
+    E: Into<DynError> + Send + Sync + 'static,
 {
-    let (mut sender, body) = Body::channel();
+    let (body, sender) = Body::channel(16);
 
     tokio::spawn(async move {
         let mut stream = std::pin::pin!(stream);
         let mut buffer = Vec::with_capacity(128);
 
-        let error: Result<(), Box<dyn std::error::Error + Send + Sync>> = loop {
+        let error: Result<(), DynError> = loop {
             match stream.next().await {
                 Some(Ok(ref value)) => {
                     let pos = buffer.len();
@@ -77,16 +80,22 @@ where
             // Flush buffer at 8KiB
             if buffer.len() >= (1024 * 8) {
                 let chunk = Bytes::from(std::mem::take(&mut buffer));
-                if let Err(e) = sender.send_data(chunk).await {
+                if let Err(e) = sender.send(Ok(Frame::data(chunk))).await {
                     log::error!("Error sending CBOR chunk: {e}");
-                    return sender.abort();
+                    if !sender.abort().await {
+                        log::error!("Error aborting CBOR stream");
+                    }
+                    return;
                 }
             }
         };
 
-        if let Err(e) = sender.send_data(buffer.into()).await {
+        if let Err(e) = sender.send(Ok(Frame::data(buffer.into()))).await {
             log::error!("Error sending CBOR chunk: {e}");
-            return sender.abort();
+            if !sender.abort().await {
+                log::error!("Error aborting CBOR stream");
+            }
+            return;
         }
 
         if let Err(e) = error {
@@ -99,6 +108,8 @@ where
 
 impl Reply for CborStream {
     fn into_response(self) -> Response {
-        self.body.with_header(APPLICATION_CBOR.clone()).into_response()
+        Response::new(self.body)
+            .with_header(APPLICATION_CBOR.clone())
+            .into_response()
     }
 }

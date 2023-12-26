@@ -1,7 +1,10 @@
+use crate::{body::BodySender, error::DynError};
+
 use super::*;
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
+use hyper::body::Frame;
 
 #[derive(Clone)]
 pub struct Json {
@@ -30,7 +33,9 @@ pub fn json<T: serde::Serialize>(value: T) -> Json {
 impl Reply for Json {
     fn into_response(self) -> Response {
         match self.inner {
-            Ok(body) => Body::from(body).with_header(ContentType::json()).into_response(),
+            Ok(body) => Response::new(Body::from(body))
+                .with_header(ContentType::json())
+                .into_response(),
 
             Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }
@@ -45,9 +50,9 @@ pub fn map_stream<K, T, E>(stream: impl Stream<Item = Result<(K, T), E>> + Send 
 where
     K: Borrow<str>,
     T: serde::Serialize + Send + Sync + 'static,
-    E: Into<Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
+    E: Into<DynError> + Send + Sync + 'static,
 {
-    let (mut sender, body) = Body::channel();
+    let (body, sender) = Body::channel(16);
 
     tokio::spawn(async move {
         let mut stream = std::pin::pin!(stream);
@@ -56,7 +61,7 @@ where
         let mut buffer = String::with_capacity(128);
         buffer.push('{');
 
-        let error: Result<(), Box<dyn std::error::Error + Send + Sync>> = loop {
+        let error: Result<(), DynError> = loop {
             match stream.next().await {
                 Some(Ok((key, ref value))) => {
                     let pos = buffer.len();
@@ -94,17 +99,23 @@ where
             // Flush buffer at 8KiB
             if buffer.len() >= (1024 * 8) {
                 let chunk = Bytes::from(std::mem::take(&mut buffer));
-                if let Err(e) = sender.send_data(chunk).await {
+                if let Err(e) = sender.send(Ok(Frame::data(chunk))).await {
                     log::error!("Error sending JSON map chunk: {e}");
-                    return sender.abort();
+                    if !sender.abort().await {
+                        log::error!("Error aborting JSON stream");
+                    }
+                    return;
                 }
             }
         };
 
         buffer.push('}');
-        if let Err(e) = sender.send_data(buffer.into()).await {
+        if let Err(e) = sender.send(Ok(Frame::data(buffer.into()))).await {
             log::error!("Error sending JSON map chunk: {e}");
-            return sender.abort();
+            if !sender.abort().await {
+                log::error!("Error aborting JSON stream");
+            }
+            return;
         }
 
         if let Err(e) = error {
@@ -118,9 +129,9 @@ where
 pub fn array_stream<T, E>(stream: impl Stream<Item = Result<T, E>> + Send + 'static) -> impl Reply
 where
     T: serde::Serialize + Send + Sync + 'static,
-    E: Into<Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
+    E: Into<DynError> + Send + Sync + 'static,
 {
-    let (mut sender, body) = Body::channel();
+    let (body, sender) = Body::channel(16);
 
     tokio::spawn(async move {
         let mut stream = std::pin::pin!(stream);
@@ -129,7 +140,7 @@ where
         let mut buffer = Vec::with_capacity(128);
         buffer.push(b'[');
 
-        let error: Result<(), Box<dyn std::error::Error + Send + Sync>> = loop {
+        let error: Result<(), DynError> = loop {
             match stream.next().await {
                 Some(Ok(ref value)) => {
                     let pos = buffer.len();
@@ -152,17 +163,23 @@ where
             // Flush buffer at 8KiB
             if buffer.len() >= (1024 * 8) {
                 let chunk = Bytes::from(std::mem::take(&mut buffer));
-                if let Err(e) = sender.send_data(chunk).await {
+                if let Err(e) = sender.send(Ok(Frame::data(chunk))).await {
                     log::error!("Error sending JSON array chunk: {e}");
-                    return sender.abort();
+                    if !sender.abort().await {
+                        log::error!("Error aborting JSON stream");
+                    }
+                    return;
                 }
             }
         };
 
         buffer.push(b']');
-        if let Err(e) = sender.send_data(buffer.into()).await {
+        if let Err(e) = sender.send(Ok(Frame::data(buffer.into()))).await {
             log::error!("Error sending JSON array chunk: {e}");
-            return sender.abort();
+            if !sender.abort().await {
+                log::error!("Error aborting JSON stream");
+            }
+            return;
         }
 
         if let Err(e) = error {
@@ -176,6 +193,8 @@ where
 impl Reply for JsonStream {
     #[inline]
     fn into_response(self) -> Response {
-        self.body.with_header(ContentType::json()).into_response()
+        Response::new(self.body)
+            .with_header(ContentType::json())
+            .into_response()
     }
 }

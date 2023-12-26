@@ -6,7 +6,8 @@ use std::task::{Context, Poll};
 
 use headers::{Connection, HeaderMapExt, SecWebsocketAccept, SecWebsocketKey, SecWebsocketVersion, Upgrade};
 use http::{Method, StatusCode};
-use hyper::{upgrade::OnUpgrade, Body};
+use hyper::upgrade::{OnUpgrade, Upgraded};
+use hyper_util::rt::TokioIo;
 use tokio_tungstenite::{
     tungstenite::{self, protocol},
     WebSocketStream,
@@ -14,7 +15,7 @@ use tokio_tungstenite::{
 
 pub use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 
-use super::{Reply, ReplyError, Response, Route};
+use super::{Reply, Response, Route};
 
 pub struct Ws {
     config: WebSocketConfig,
@@ -40,25 +41,6 @@ pub enum WsError {
     MissingWebSocketKey,
 }
 
-impl Reply for WsError {
-    fn into_response(self) -> Response {
-        self.status().into_response()
-    }
-}
-
-impl ReplyError for WsError {
-    fn status(&self) -> StatusCode {
-        match self {
-            WsError::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
-            _ => StatusCode::BAD_REQUEST,
-        }
-    }
-
-    fn into_error_response(self) -> Response {
-        self.into_response()
-    }
-}
-
 impl Ws {
     /// Creates a Websocket response.
     ///
@@ -82,11 +64,11 @@ impl Ws {
     /// - Header `upgrade: websocket`
     /// - Header `sec-websocket-accept` with the hash value of the received key.
     pub fn new<S>(mut route: Route<S>, config: Option<WebSocketConfig>) -> Result<Ws, WsError> {
-        if route.req.method() != Method::GET {
+        if route.method() != Method::GET {
             return Err(WsError::MethodNotAllowed);
         }
 
-        let headers = route.req.headers();
+        let headers = route.headers();
 
         match headers.typed_get::<Connection>() {
             Some(header) if header.contains("upgrade") => {}
@@ -108,7 +90,7 @@ impl Ws {
             None => return Err(WsError::MissingWebSocketKey),
         };
 
-        let on_upgrade = route.req.extensions_mut().remove::<OnUpgrade>();
+        let on_upgrade = route.head.extensions.remove::<OnUpgrade>();
 
         Ok(Ws {
             config: config.unwrap_or_default(),
@@ -191,7 +173,7 @@ where
 }
 
 pub struct WebSocket {
-    inner: WebSocketStream<hyper::upgrade::Upgraded>,
+    inner: WebSocketStream<TokioIo<Upgraded>>,
 }
 
 /// A websocket `Stream` and `Sink`, provided to `ws` filters.
@@ -201,12 +183,12 @@ pub struct WebSocket {
 /// `WebSocket`.
 impl WebSocket {
     pub(crate) async fn from_raw_socket(
-        upgraded: hyper::upgrade::Upgraded,
+        upgraded: Upgraded,
         role: protocol::Role,
         config: protocol::WebSocketConfig,
     ) -> Self {
         WebSocket {
-            inner: WebSocketStream::from_raw_socket(upgraded, role, Some(config)).await,
+            inner: WebSocketStream::from_raw_socket(TokioIo::new(upgraded), role, Some(config)).await,
         }
     }
 

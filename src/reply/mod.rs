@@ -1,8 +1,10 @@
+use crate::{Body, Response};
+
 use std::borrow::Borrow;
 
+use bytes::Bytes;
 use headers::{ContentType, Header, HeaderMapExt};
-use http::{Response as HttpResponse, StatusCode};
-use hyper::Body;
+use http::StatusCode;
 
 pub mod deferred;
 
@@ -16,8 +18,6 @@ pub mod msgpack;
 
 #[cfg(feature = "cbor")]
 pub mod cbor;
-
-pub type Response = HttpResponse<Body>;
 
 pub trait Reply: Sized {
     fn into_response(self) -> Response;
@@ -33,30 +33,6 @@ pub trait Reply: Sized {
         H: Header,
     {
         WithHeader { reply: self, header }
-    }
-}
-
-pub trait ReplyError: Reply {
-    fn status(&self) -> StatusCode {
-        StatusCode::INTERNAL_SERVER_ERROR
-    }
-
-    fn into_error_response(self) -> Response {
-        let status = self.status();
-        self.with_status(status).into_response()
-    }
-}
-
-impl<R, E> Reply for Result<R, E>
-where
-    R: Reply,
-    E: ReplyError,
-{
-    fn into_response(self) -> Response {
-        match self {
-            Ok(reply) => reply.into_response(),
-            Err(err) => err.into_error_response(),
-        }
     }
 }
 
@@ -93,7 +69,7 @@ pub fn reply() -> impl Reply {
 
 impl Reply for () {
     fn into_response(self) -> Response {
-        reply().into_response()
+        StatusCode::OK.into_response()
     }
 }
 
@@ -138,21 +114,14 @@ impl<R: Reply, H: Header> Reply for WithHeader<R, H> {
 impl Reply for &'static str {
     #[inline]
     fn into_response(self) -> Response {
-        Response::new(Body::from(self))
+        Response::new(Bytes::from(self).into())
     }
 }
 
 impl Reply for String {
     #[inline]
     fn into_response(self) -> Response {
-        Response::new(Body::from(self))
-    }
-}
-
-impl Reply for Body {
-    #[inline]
-    fn into_response(self) -> Response {
-        Response::new(self)
+        Response::new(self.into())
     }
 }
 
@@ -166,32 +135,8 @@ impl Reply for Response {
 impl Reply for StatusCode {
     #[inline]
     fn into_response(self) -> Response {
-        let mut res = Response::new(Body::empty());
+        let mut res = Response::new(Body::Empty);
         *res.status_mut() = self;
         res
-    }
-}
-
-impl ReplyError for StatusCode {
-    #[inline]
-    fn status(&self) -> StatusCode {
-        *self
-    }
-
-    #[inline]
-    fn into_error_response(self) -> Response {
-        self.into_response()
-    }
-}
-
-impl ReplyError for Response {
-    #[inline]
-    fn status(&self) -> StatusCode {
-        self.status()
-    }
-
-    #[inline]
-    fn into_error_response(self) -> Response {
-        self
     }
 }

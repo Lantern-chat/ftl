@@ -1,7 +1,10 @@
+use crate::error::DynError;
+
 use super::*;
 
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
+use hyper::body::Frame;
 
 pub struct MsgPack {
     inner: Result<Bytes, ()>,
@@ -34,7 +37,7 @@ pub fn msgpack<T: serde::Serialize>(value: &T, named: bool) -> MsgPack {
 impl Reply for MsgPack {
     fn into_response(self) -> Response {
         match self.inner {
-            Ok(body) => Body::from(body)
+            Ok(body) => Response::new(Body::from(body))
                 .with_header(ContentType::from(mime::APPLICATION_MSGPACK))
                 .into_response(),
             Err(()) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -52,16 +55,16 @@ pub fn array_stream<T, E>(
 ) -> impl Reply
 where
     T: serde::Serialize + Send + Sync + 'static,
-    E: Into<Box<dyn std::error::Error + Send + Sync>> + Send + Sync + 'static,
+    E: Into<DynError> + Send + Sync + 'static,
 {
-    let (mut sender, body) = Body::channel();
+    let (body, sender) = Body::channel(16);
 
     tokio::spawn(async move {
         let mut stream = std::pin::pin!(stream);
 
         let mut buffer = Vec::with_capacity(128);
 
-        let error: Result<(), Box<dyn std::error::Error + Send + Sync>> = loop {
+        let error: Result<(), DynError> = loop {
             match stream.next().await {
                 Some(Ok(ref value)) => {
                     let pos = buffer.len();
@@ -83,16 +86,22 @@ where
             // Flush buffer at 8KiB
             if buffer.len() >= (1024 * 8) {
                 let chunk = Bytes::from(std::mem::take(&mut buffer));
-                if let Err(e) = sender.send_data(chunk).await {
+                if let Err(e) = sender.send(Ok(Frame::data(chunk))).await {
                     log::error!("Error sending MessagePack chunk: {e}");
-                    return sender.abort();
+                    if !sender.abort().await {
+                        log::error!("Error aborting MsgPack stream");
+                    }
+                    return;
                 }
             }
         };
 
-        if let Err(e) = sender.send_data(buffer.into()).await {
+        if let Err(e) = sender.send(Ok(Frame::data(buffer.into()))).await {
             log::error!("Error sending MessagePack chunk: {e}");
-            return sender.abort();
+            if !sender.abort().await {
+                log::error!("Error aborting MsgPack stream");
+            }
+            return;
         }
 
         if let Err(e) = error {
@@ -105,7 +114,7 @@ where
 
 impl Reply for MsgPackStream {
     fn into_response(self) -> Response {
-        self.body
+        Response::new(self.body)
             .with_header(ContentType::from(mime::APPLICATION_MSGPACK))
             .into_response()
     }

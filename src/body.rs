@@ -2,13 +2,125 @@ use std::marker::PhantomData;
 
 use bytes::{Buf, Bytes};
 use headers::ContentType;
-use http::StatusCode;
+use http::{Response as HttpResponse, StatusCode};
+use hyper::body::{Body as HttpBody, Frame};
 use serde::de::{Deserialize, DeserializeOwned};
+use tokio::sync::mpsc;
 
-use super::{BodyError, Reply, ReplyError, Response, Route};
+use super::{BodyError, Error, Reply, Route};
 
 lazy_static::lazy_static! {
     pub static ref APPLICATION_CBOR: ContentType = ContentType::from("application/cbor".parse::<mime::Mime>().unwrap());
+}
+
+use http_body_util::{Full, StreamBody};
+
+use tokio_stream::wrappers::ReceiverStream;
+
+pub type Response = HttpResponse<Body>;
+
+#[derive(Default)]
+#[pin_project::pin_project(project = BodyProj)]
+pub enum Body {
+    #[default]
+    Empty,
+    Full(#[pin] Full<Bytes>),
+    Stream(#[pin] StreamBody<ReceiverStream<Result<Frame<Bytes>, Error>>>),
+    // DynStream(#[pin] StreamBody<Box<dyn futures::Stream<Item = Result<Frame<Bytes>, Error>> + 'static>>),
+    //Buf(#[pin] Full<Box<dyn Buf + 'static>>),
+    Dyn(#[pin] Pin<Box<dyn HttpBody<Data = Bytes, Error = Error> + 'static>>),
+}
+
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+impl HttpBody for Body {
+    type Data = Bytes;
+    type Error = Error;
+
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        match self.project() {
+            BodyProj::Empty => Poll::Ready(None),
+            BodyProj::Full(full) => full.poll_frame(cx).map_err(|_| unreachable!()),
+            BodyProj::Stream(stream) => stream.poll_frame(cx),
+            // BodyProj::DynStream(stream) => stream.poll_frame(cx),
+            BodyProj::Dyn(body) => body.poll_frame(cx),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            Body::Empty => true,
+            Body::Full(inner) => inner.is_end_stream(),
+            Body::Stream(inner) => inner.is_end_stream(),
+            // Body::DynStream(inner) => inner.is_end_stream(),
+            Body::Dyn(inner) => inner.is_end_stream(),
+        }
+    }
+
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        match self {
+            Body::Empty => hyper::body::SizeHint::new(),
+            Body::Full(inner) => inner.size_hint(),
+            Body::Stream(inner) => inner.size_hint(),
+            // Body::DynStream(inner) => inner.size_hint(),
+            Body::Dyn(inner) => inner.size_hint(),
+        }
+    }
+}
+
+impl From<Bytes> for Body {
+    fn from(value: Bytes) -> Self {
+        Body::Full(Full::new(value))
+    }
+}
+
+impl From<String> for Body {
+    fn from(value: String) -> Self {
+        Bytes::from(value).into()
+    }
+}
+
+impl Body {
+    pub fn channel(capacity: usize) -> (Self, BodySender) {
+        let (tx, rx) = mpsc::channel::<Result<Frame<Bytes>, Error>>(capacity);
+
+        (
+            Body::Stream(StreamBody::new(ReceiverStream::new(rx))),
+            BodySender(tx),
+        )
+    }
+
+    pub fn wrap_stream() {}
+
+    // pub fn stream<S>(stream: S) -> Body
+    // where
+    //     S: futures::Stream<Item = Result<Frame<Bytes>, Error>> + 'static,
+    // {
+    //     Body::DynStream(StreamBody::new(Box::new(stream)))
+    // }
+}
+
+pub struct BodySender(mpsc::Sender<Result<Frame<Bytes>, Error>>);
+
+impl std::ops::Deref for BodySender {
+    type Target = mpsc::Sender<Result<Frame<Bytes>, Error>>;
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl BodySender {
+    pub async fn abort(self) -> bool {
+        self.send(Err(Error::StreamAborted)).await.is_ok()
+    }
 }
 
 pub async fn any<T, S>(route: &mut Route<S>) -> Result<T, BodyDeserializeError>
@@ -39,7 +151,7 @@ where
         return Err(BodyDeserializeError::IncorrectContentType);
     };
 
-    let reader = route.aggregate().await?.reader();
+    let reader = route.collect().await?.aggregate().reader();
 
     Ok(match kind {
         #[cfg(feature = "json")]
@@ -91,7 +203,7 @@ where
         return Err(BodyDeserializeError::IncorrectContentType);
     }
 
-    let body = route.aggregate().await?;
+    let body = route.collect().await?.aggregate();
 
     Ok(serde_json::from_reader(body.reader())?)
 }
@@ -132,7 +244,7 @@ where
         _ => return Err(BodyDeserializeError::IncorrectContentType),
     }
 
-    let body = route.aggregate().await?;
+    let body = route.collect().await?.aggregate();
 
     Ok(serde_urlencoded::from_reader(body.reader())?)
 }
@@ -147,7 +259,7 @@ where
         _ => return Err(BodyDeserializeError::IncorrectContentType),
     }
 
-    let body = route.aggregate().await?;
+    let body = route.collect().await?.aggregate();
 
     Ok(rmp_serde::from_read(body.reader())?)
 }
@@ -162,29 +274,9 @@ where
         _ => return Err(BodyDeserializeError::IncorrectContentType),
     }
 
-    let body = route.aggregate().await?;
+    let body = route.collect().await?.aggregate();
 
     Ok(ciborium::de::from_reader(body.reader())?)
-}
-
-impl Reply for BodyDeserializeError {
-    fn into_response(self) -> Response {
-        match self {
-            BodyDeserializeError::IncorrectContentType => "Incorrect Content-Type"
-                .with_status(StatusCode::BAD_REQUEST)
-                .into_response(),
-            _ => self.status().into_response(),
-        }
-    }
-}
-
-impl ReplyError for BodyDeserializeError {
-    fn status(&self) -> StatusCode {
-        match self {
-            BodyDeserializeError::BodyError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            _ => StatusCode::BAD_REQUEST,
-        }
-    }
 }
 
 pub fn content_length_limit<S>(route: &Route<S>, limit: u64) -> Option<impl Reply> {

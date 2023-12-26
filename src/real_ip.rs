@@ -18,7 +18,7 @@ pub enum GetRealIpError {
 }
 
 pub fn get_real_ip<S>(route: &Route<S>) -> Result<IpAddr, GetRealIpError> {
-    let headers = route.req.headers();
+    let headers = route.headers();
 
     if let Some(Ok(mut proxies)) = route.forwarded_for() {
         if let Some(first) = proxies.next() {

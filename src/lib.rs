@@ -6,7 +6,8 @@
 extern crate tracing as log;
 
 pub mod body;
-pub mod compression;
+//pub mod compression;
+pub mod error;
 pub mod fs;
 pub mod rate_limit;
 pub mod real_ip;
@@ -17,9 +18,11 @@ pub mod ws;
 #[cfg(feature = "multipart")]
 pub mod multipart;
 
-pub use http::{Method, StatusCode};
+pub use http::{Method, Request, StatusCode};
 
-pub use self::reply::{Reply, ReplyError, Response};
+pub use self::body::{Body, Response};
+pub use self::error::Error;
+pub use self::reply::Reply;
 pub use self::route::{
     BodyError, Route,
     Segment::{self, End, Exact},

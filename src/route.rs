@@ -11,22 +11,24 @@ use headers::{Header, HeaderMapExt, HeaderValue};
 use http::{
     header::{AsHeaderName, HeaderName, ToStrError},
     method::InvalidMethod,
+    request::Parts,
     uri::Authority,
-    Method,
+    HeaderMap, Method,
 };
+use http_body_util::{BodyStream, Collected};
 use hyper::{
-    body::{aggregate, HttpBody},
-    Body, Request, Response,
+    body::{Body, Frame, Incoming},
+    Request, Response,
 };
 
 pub struct Route<S> {
     pub addr: SocketAddr,
     pub real_addr: SocketAddr,
-    pub req: Request<Body>,
+    pub head: Parts,
+    pub body: Option<Incoming>,
     pub state: S,
     pub segment_index: usize,
     pub next_segment_index: usize,
-    pub has_body: bool,
     pub start: Instant,
 }
 
@@ -38,16 +40,18 @@ pub enum Segment<'a> {
 
 impl<S> Route<S> {
     #[inline]
-    pub fn new(addr: SocketAddr, req: Request<Body>, state: S) -> Route<S> {
+    pub fn new(addr: SocketAddr, req: Request<Incoming>, state: S) -> Route<S> {
+        let (head, body) = req.into_parts();
+
         let mut route = Route {
             start: Instant::now(),
             addr,
             real_addr: addr,
-            req,
+            head,
+            body: Some(body), // once told me
             state,
             segment_index: 0,
             next_segment_index: 0,
-            has_body: true,
         };
 
         if let Ok(addr) = crate::real_ip::get_real_ip(&route) {
@@ -68,7 +72,7 @@ impl<S> Route<S> {
     /// This is sometimes used in old browsers without support for PATCH or OPTIONS methods.
     pub fn apply_method_override(&mut self) -> Result<(), InvalidMethod> {
         if let Some(method_override) = self.raw_header(HeaderName::from_static("x-http-method-override")) {
-            *self.req.method_mut() = Method::from_bytes(method_override.as_bytes())?;
+            self.head.method = Method::from_bytes(method_override.as_bytes())?;
         }
 
         Ok(())
@@ -79,7 +83,7 @@ impl<S> Route<S> {
     ///
     /// If no consistent host authority can be found, `None` is returned.
     pub fn host(&self) -> Option<Authority> {
-        let from_uri = self.req.uri().authority();
+        let from_uri = self.head.uri.authority();
 
         let from_header = match self.parse_raw_header::<Authority, _>(HeaderName::from_static("host")) {
             Some(Ok(Ok(host))) => Some(host),
@@ -97,17 +101,17 @@ impl<S> Route<S> {
 
     /// Parse the URI query
     pub fn query<T: serde::de::DeserializeOwned>(&self) -> Option<Result<T, serde_urlencoded::de::Error>> {
-        self.req.uri().query().map(serde_urlencoded::de::from_str)
+        self.head.uri.query().map(serde_urlencoded::de::from_str)
     }
 
     #[inline]
     pub fn raw_query(&self) -> Option<&str> {
-        self.req.uri().query()
+        self.head.uri.query()
     }
 
     #[inline]
     pub fn path(&self) -> &str {
-        self.req.uri().path()
+        self.head.uri.path()
     }
 
     /// Returns the remaining parts of the URI path **After** the current segment.
@@ -134,8 +138,9 @@ impl<S> Route<S> {
 
     /// Returns both the `Method` and URI `Segment` a the same time for convenient `match` statements.
     pub fn method_segment(&self) -> (&Method, Segment) {
-        let path = self.req.uri().path();
-        let method = self.req.method();
+        let path = self.path();
+        let method = self.method();
+
         let segment = if self.segment_index == path.len() {
             Segment::End
         } else {
@@ -152,17 +157,21 @@ impl<S> Route<S> {
 
     #[inline]
     pub fn method(&self) -> &Method {
-        self.req.method()
+        &self.head.method
+    }
+
+    pub fn headers(&self) -> &HeaderMap<HeaderValue> {
+        &self.head.headers
     }
 
     #[inline]
     pub fn header<H: Header>(&self) -> Option<H> {
-        self.req.headers().typed_get()
+        self.head.headers.typed_get()
     }
 
     #[inline]
     pub fn raw_header<K: AsHeaderName>(&self, name: K) -> Option<&HeaderValue> {
-        self.req.headers().get(name)
+        self.head.headers.get(name)
     }
 
     /// Parse a header value using `FromStr`
@@ -183,9 +192,9 @@ impl<S> Route<S> {
     }
 
     /// Parses the proxy chain in the `x-forwarded-for` HTTP header.
-    pub fn forwarded_for<'a>(
-        &'a self,
-    ) -> Option<Result<impl Iterator<Item = Result<IpAddr, AddrParseError>> + 'a, ToStrError>> {
+    pub fn forwarded_for(
+        &self,
+    ) -> Option<Result<impl Iterator<Item = Result<IpAddr, AddrParseError>> + '_, ToStrError>> {
         self.raw_header(HeaderName::from_static("x-forwarded-for"))
             .map(|ff| {
                 ff.to_str()
@@ -199,7 +208,7 @@ impl<S> Route<S> {
     pub fn next_mut(&mut self) -> &mut Self {
         self.segment_index = self.next_segment_index;
 
-        let path = self.req.uri().path();
+        let path = self.head.uri.path(); // avoid whole self lifetime
 
         // already at end, nothing to do
         if self.segment_index == path.len() {
@@ -221,49 +230,36 @@ impl<S> Route<S> {
         self
     }
 
-    /// Same as [`.next_mut()`] but without the `mut`
+    /// Same as [`.next_mut()`] but without the `mut` borrow of Self
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> &Self {
         self.next_mut()
     }
 
-    pub fn body(&self) -> &Body {
-        self.req.body()
+    pub fn body(&self) -> Option<&Incoming> {
+        self.body.as_ref()
     }
 
     /// Takes ownership of the request body, returning `None` if it was already consumed.
-    pub fn take_body(&mut self) -> Option<Body> {
-        if self.has_body {
-            let body = std::mem::replace(self.req.body_mut(), Body::empty());
-            self.has_body = false;
-            Some(body)
-        } else {
-            None
-        }
+    pub fn take_body(&mut self) -> Option<Incoming> {
+        self.body.take()
     }
 
-    /// Combines the body together in a buffered but chunked set of buffers
+    /// Combines the body together into a buffered but chunked set of buffers
     ///
-    /// Prefer this to `bytes()` when you don't care about random-access (i.e. using `buf.as_reader()`)
-    pub async fn aggregate(&mut self) -> Result<impl Buf, BodyError> {
+    /// Use `aggregate` or `to_bytes` on `Collected<Bytes>` for your use cases.
+    pub async fn collect(&mut self) -> Result<Collected<Bytes>, BodyError> {
+        use http_body_util::BodyExt;
+
         Ok(match self.take_body() {
-            Some(body) => hyper::body::aggregate(body).await?,
+            Some(body) => body.collect().await?,
             None => return Err(BodyError::DoubleUseError),
         })
     }
 
-    /// Concatenates the body together into a single contiguous buffer
-    ///
-    /// Prefer `aggregate()` when you don't care about random-access (i.e. using `buf.as_reader()`)
-    pub async fn bytes(&mut self) -> Result<Bytes, BodyError> {
+    pub fn stream(&mut self) -> Result<BodyStream<Incoming>, BodyError> {
         Ok(match self.take_body() {
-            Some(body) => hyper::body::to_bytes(body).await?,
-            None => return Err(BodyError::DoubleUseError),
-        })
-    }
-
-    pub fn stream(&mut self) -> Result<impl Stream<Item = Result<Bytes, hyper::Error>>, BodyError> {
-        Ok(match self.take_body() {
-            Some(body) => body,
+            Some(body) => BodyStream::new(body),
             None => return Err(BodyError::DoubleUseError),
         })
     }
