@@ -19,6 +19,13 @@ use tokio_stream::wrappers::ReceiverStream;
 
 pub type Response = HttpResponse<Body>;
 
+impl Reply for Body {
+    #[inline]
+    fn into_response(self) -> Response {
+        Response::new(self)
+    }
+}
+
 #[derive(Default)]
 #[pin_project::pin_project(project = BodyProj)]
 pub enum Body {
