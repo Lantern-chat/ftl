@@ -110,8 +110,13 @@ impl<S> Route<S> {
     }
 
     #[inline]
+    pub fn uri(&self) -> &http::Uri {
+        &self.head.uri
+    }
+
+    #[inline]
     pub fn path(&self) -> &str {
-        self.head.uri.path()
+        self.uri().path()
     }
 
     /// Returns the remaining parts of the URI path **After** the current segment.
