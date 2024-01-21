@@ -1,6 +1,6 @@
 use std::mem::size_of_val;
 
-use crate::{body::BodySender, error::DynError, APPLICATION_CBOR};
+use crate::{body::BodySender, error::Error, APPLICATION_CBOR};
 
 use super::*;
 
@@ -48,68 +48,73 @@ impl Reply for Cbor {
     }
 }
 
-pub struct CborStream {
-    body: Body,
+#[pin_project::pin_project]
+struct CborArrayBody<S> {
+    buffer: Vec<u8>,
+
+    #[pin]
+    stream: S,
 }
 
-pub fn array_stream<T, E>(stream: impl Stream<Item = Result<T, E>> + Send + 'static) -> impl Reply
+use std::{
+    mem,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+pub fn array_stream<S, T, E>(stream: S) -> impl Reply
 where
+    S: Stream<Item = Result<T, E>> + Send + 'static,
     T: serde::Serialize + Send + Sync + 'static,
-    E: Into<DynError> + Send + Sync + 'static,
+    E: std::error::Error,
 {
-    let (body, sender) = Body::channel(16);
+    return Body::Dyn(Box::pin(CborArrayBody {
+        buffer: Vec::new(),
+        stream,
+    }))
+    .with_header(APPLICATION_CBOR.clone());
 
-    tokio::spawn(async move {
-        let mut stream = std::pin::pin!(stream);
-        let mut buffer = Vec::with_capacity(128);
+    impl<S, T, E> hyper::body::Body for CborArrayBody<S>
+    where
+        S: Stream<Item = Result<T, E>> + Send + 'static,
+        T: serde::Serialize + Send + Sync + 'static,
+        E: std::error::Error,
+    {
+        type Data = Bytes;
+        type Error = Error;
 
-        let error: Result<(), DynError> = loop {
-            match stream.next().await {
-                Some(Ok(ref value)) => {
-                    let pos = buffer.len();
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            let mut this = self.project();
 
-                    if let Err(e) = ciborium::ser::into_writer(value, &mut buffer) {
-                        buffer.truncate(pos); // revert back to previous item
-                        break Err(e.into());
+            while let Some(item) = futures::ready!(this.stream.as_mut().poll_next(cx)) {
+                let item = match item {
+                    Ok(item) => item,
+                    Err(e) => {
+                        log::error!("Error sending CBOR stream: {e}");
+                        break;
                     }
-                }
-                Some(Err(e)) => break Err(e.into()),
-                None => break Ok(()),
-            }
+                };
 
-            // Flush buffer at 8KiB
-            if buffer.len() >= (1024 * 8) {
-                let chunk = Bytes::from(std::mem::take(&mut buffer));
-                if let Err(e) = sender.send(Ok(Frame::data(chunk))).await {
-                    log::error!("Error sending CBOR chunk: {e}");
-                    if !sender.abort().await {
-                        log::error!("Error aborting CBOR stream");
-                    }
-                    return;
+                let pos = this.buffer.len();
+
+                if let Err(e) = ciborium::into_writer(&item, &mut this.buffer) {
+                    this.buffer.truncate(pos);
+                    log::error!("Error encoding CBOR stream: {e}");
+                    break;
+                }
+
+                if this.buffer.len() >= (1024 * 8) {
+                    return Poll::Ready(Some(Ok(Frame::data(Bytes::from(mem::take(this.buffer))))));
                 }
             }
-        };
 
-        if let Err(e) = sender.send(Ok(Frame::data(buffer.into()))).await {
-            log::error!("Error sending CBOR chunk: {e}");
-            if !sender.abort().await {
-                log::error!("Error aborting CBOR stream");
-            }
-            return;
+            Poll::Ready(match this.buffer.is_empty() {
+                false => Some(Ok(Frame::data(Bytes::from(mem::take(this.buffer))))),
+                true => None,
+            })
         }
-
-        if let Err(e) = error {
-            log::error!("Error serializing CBOR stream: {e}");
-        }
-    });
-
-    CborStream { body }
-}
-
-impl Reply for CborStream {
-    fn into_response(self) -> Response {
-        Response::new(self.body)
-            .with_header(APPLICATION_CBOR.clone())
-            .into_response()
     }
 }

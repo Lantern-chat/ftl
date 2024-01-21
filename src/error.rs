@@ -1,5 +1,3 @@
-pub(crate) type DynError = Box<dyn std::error::Error + Send + Sync>;
-
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("Hyper error: {0}")]

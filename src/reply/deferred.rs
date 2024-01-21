@@ -1,5 +1,3 @@
-use crate::error::DynError;
-
 use super::*;
 
 pub struct DeferredValue(Box<dyn IndirectSerialize + Send + 'static>);

@@ -76,11 +76,6 @@ struct JsonMapBody<S> {
     stream: S,
 }
 
-enum EncodeError<E> {
-    ItemError(E),
-    JsonError(serde_json::Error),
-}
-
 #[must_use]
 #[allow(clippy::single_char_add_str)]
 pub fn map_stream<S, K, T, E>(stream: S) -> impl Reply
@@ -123,49 +118,43 @@ where
                 _ => {}
             }
 
-            let res: Option<EncodeError<E>> = 'encode: {
-                while let Some(item) = futures::ready!(this.stream.poll_next_unpin(cx)) {
-                    let (key, value) = match item {
-                        Ok(item) => item,
-                        Err(e) => break 'encode Some(EncodeError::ItemError(e)),
-                    };
-
-                    let pos = this.buffer.len();
-                    let key = key.borrow();
-
-                    // most keys will be well-behaved and not need escaping, so `,"key":`
-                    // extra byte won't hurt anything when the value is serialized
-                    this.buffer.reserve(key.len() + 4);
-
-                    if let State::First = *this.state {
-                        this.buffer.push_str("\"");
-                        *this.state = State::Running;
-                    } else {
-                        this.buffer.push_str(",\"");
+            while let Some(item) = futures::ready!(this.stream.as_mut().poll_next(cx)) {
+                let (key, value) = match item {
+                    Ok(item) => item,
+                    Err(e) => {
+                        log::error!("Error sending JSON map stream: {e}");
+                        break;
                     }
+                };
 
-                    use std::fmt::Write;
-                    write!(this.buffer, "{}", v_jsonescape::escape(key)).expect("Unable to write to buffer");
+                let pos = this.buffer.len();
+                let key = key.borrow();
 
-                    this.buffer.push_str("\":");
+                // most keys will be well-behaved and not need escaping, so `,"key":`
+                // extra byte won't hurt anything when the value is serialized
+                this.buffer.reserve(key.len() + 4);
 
-                    if let Err(e) = serde_json::to_writer(unsafe { this.buffer.as_mut_vec() }, &value) {
-                        this.buffer.truncate(pos); // revert back to previous element
-                        break 'encode Some(EncodeError::JsonError(e));
-                    }
-
-                    if this.buffer.len() >= (1024 * 8) {
-                        return Poll::Ready(Some(Ok(Frame::data(Bytes::from(mem::take(this.buffer))))));
-                    }
+                if let State::First = *this.state {
+                    this.buffer.push_str("\"");
+                    *this.state = State::Running;
+                } else {
+                    this.buffer.push_str(",\"");
                 }
 
-                None
-            };
+                use std::fmt::Write;
+                write!(this.buffer, "{}", v_jsonescape::escape(key)).expect("Unable to write to buffer");
 
-            match res {
-                Some(EncodeError::ItemError(e)) => log::error!("Error sending JSON map stream: {e}"),
-                Some(EncodeError::JsonError(e)) => log::error!("Error encoding JSON map stream: {e}"),
-                _ => {}
+                this.buffer.push_str("\":");
+
+                if let Err(e) = serde_json::to_writer(unsafe { this.buffer.as_mut_vec() }, &value) {
+                    this.buffer.truncate(pos); // revert back to previous element
+                    log::error!("Error encoding JSON map stream: {e}");
+                    break;
+                }
+
+                if this.buffer.len() >= (1024 * 8) {
+                    return Poll::Ready(Some(Ok(Frame::data(Bytes::from(mem::take(this.buffer))))));
+                }
             }
 
             this.buffer.push_str("}");
@@ -215,37 +204,31 @@ where
                 _ => {}
             }
 
-            let res: Option<EncodeError<E>> = 'encode: {
-                while let Some(item) = futures::ready!(this.stream.poll_next_unpin(cx)) {
-                    let item = match item {
-                        Ok(item) => item,
-                        Err(e) => break 'encode Some(EncodeError::ItemError(e)),
-                    };
-
-                    let pos = this.buffer.len();
-
-                    if let State::First = *this.state {
-                        this.buffer.push(b',');
-                        *this.state = State::Running;
+            while let Some(item) = futures::ready!(this.stream.as_mut().poll_next(cx)) {
+                let item = match item {
+                    Ok(item) => item,
+                    Err(e) => {
+                        log::error!("Error sending JSON array stream: {e}");
+                        break;
                     }
+                };
 
-                    if let Err(e) = serde_json::to_writer(&mut this.buffer, &item) {
-                        this.buffer.truncate(pos); // revert back to previous element
-                        break 'encode Some(EncodeError::JsonError(e));
-                    }
+                let pos = this.buffer.len();
 
-                    if this.buffer.len() >= (1024 * 8) {
-                        return Poll::Ready(Some(Ok(Frame::data(Bytes::from(mem::take(this.buffer))))));
-                    }
+                if let State::First = *this.state {
+                    this.buffer.push(b',');
+                    *this.state = State::Running;
                 }
 
-                None
-            };
+                if let Err(e) = serde_json::to_writer(&mut this.buffer, &item) {
+                    this.buffer.truncate(pos); // revert back to previous element
+                    log::error!("Error encoding JSON array stream: {e}");
+                    break;
+                }
 
-            match res {
-                Some(EncodeError::ItemError(e)) => log::error!("Error sending JSON array stream: {e}"),
-                Some(EncodeError::JsonError(e)) => log::error!("Error encoding JSON array stream: {e}"),
-                _ => {}
+                if this.buffer.len() >= (1024 * 8) {
+                    return Poll::Ready(Some(Ok(Frame::data(Bytes::from(mem::take(this.buffer))))));
+                }
             }
 
             this.buffer.push(b']');
