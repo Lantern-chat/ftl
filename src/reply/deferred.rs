@@ -19,7 +19,7 @@ impl DeferredStream {
     pub fn new<T, E>(stream: impl futures::Stream<Item = Result<T, E>> + Send + 'static) -> Self
     where
         T: serde::Serialize + Send + Sync + 'static,
-        E: Into<DynError> + Send + Sync + 'static,
+        E: std::error::Error + Send + Sync + 'static,
     {
         DeferredStream(Box::new(Some(stream)))
     }
@@ -92,7 +92,7 @@ impl<S, T, E> IndirectStream for Option<S>
 where
     S: futures::Stream<Item = Result<T, E>> + Send + 'static,
     T: serde::Serialize + Send + Sync + 'static,
-    E: Into<DynError> + Send + Sync + 'static,
+    E: std::error::Error + Send + Sync + 'static,
 {
     #[cfg(feature = "json")]
     fn as_json(&mut self) -> Response {

@@ -1,4 +1,4 @@
-use crate::{body::BodySender, error::DynError};
+use crate::{body::BodySender, error::Error};
 
 use super::*;
 
@@ -42,159 +42,216 @@ impl Reply for Json {
     }
 }
 
-pub struct JsonStream {
-    body: Body,
+use std::{
+    mem,
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+#[derive(Clone, Copy)]
+enum State {
+    New,
+    First,
+    Running,
+    Done,
 }
 
-pub fn map_stream<K, T, E>(stream: impl Stream<Item = Result<(K, T), E>> + Send + 'static) -> impl Reply
+#[pin_project::pin_project]
+struct JsonArrayBody<S> {
+    state: State,
+
+    buffer: Vec<u8>,
+
+    #[pin]
+    stream: S,
+}
+
+#[pin_project::pin_project]
+struct JsonMapBody<S> {
+    state: State,
+
+    buffer: String,
+
+    #[pin]
+    stream: S,
+}
+
+enum EncodeError<E> {
+    ItemError(E),
+    JsonError(serde_json::Error),
+}
+
+#[must_use]
+#[allow(clippy::single_char_add_str)]
+pub fn map_stream<S, K, T, E>(stream: S) -> impl Reply
 where
+    S: Stream<Item = Result<(K, T), E>> + Send + 'static,
     K: Borrow<str>,
     T: serde::Serialize + Send + Sync + 'static,
-    E: Into<DynError> + Send + Sync + 'static,
+    E: std::error::Error,
 {
-    let (body, sender) = Body::channel(16);
+    return Body::Dyn(Box::pin(JsonMapBody {
+        state: State::New,
+        buffer: String::new(),
+        stream,
+    }))
+    .with_header(ContentType::json());
 
-    tokio::spawn(async move {
-        let mut stream = std::pin::pin!(stream);
+    impl<S, K, T, E> hyper::body::Body for JsonMapBody<S>
+    where
+        S: Stream<Item = Result<(K, T), E>> + Send + 'static,
+        K: Borrow<str>,
+        T: serde::Serialize + Send + Sync + 'static,
+        E: std::error::Error,
+    {
+        type Data = Bytes;
+        type Error = Error;
 
-        let mut first = true;
-        let mut buffer = String::with_capacity(128);
-        buffer.push('{');
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            let mut this = self.project();
 
-        let error: Result<(), DynError> = loop {
-            match stream.next().await {
-                Some(Ok((key, ref value))) => {
-                    let pos = buffer.len();
+            match this.state {
+                State::New => {
+                    this.buffer.reserve(128);
+                    this.buffer.push_str("{");
+                    *this.state = State::First
+                }
+                State::Done => return Poll::Ready(None),
+                _ => {}
+            }
+
+            let res: Option<EncodeError<E>> = 'encode: {
+                while let Some(item) = futures::ready!(this.stream.poll_next_unpin(cx)) {
+                    let (key, value) = match item {
+                        Ok(item) => item,
+                        Err(e) => break 'encode Some(EncodeError::ItemError(e)),
+                    };
+
+                    let pos = this.buffer.len();
                     let key = key.borrow();
 
                     // most keys will be well-behaved and not need escaping, so `,"key":`
                     // extra byte won't hurt anything when the value is serialized
-                    buffer.reserve(key.len() + 4);
+                    this.buffer.reserve(key.len() + 4);
 
-                    if !first {
-                        buffer.push_str(",\"");
+                    if let State::First = *this.state {
+                        this.buffer.push_str("\"");
+                        *this.state = State::Running;
                     } else {
-                        buffer.push('"');
+                        this.buffer.push_str(",\"");
                     }
 
                     use std::fmt::Write;
-                    if let Err(e) = write!(buffer, "{}", v_jsonescape::escape(key)) {
-                        buffer.truncate(pos); // revert back to previous element
-                        break Err(e.into());
+                    write!(this.buffer, "{}", v_jsonescape::escape(key)).expect("Unable to write to buffer");
+
+                    this.buffer.push_str("\":");
+
+                    if let Err(e) = serde_json::to_writer(unsafe { this.buffer.as_mut_vec() }, &value) {
+                        this.buffer.truncate(pos); // revert back to previous element
+                        break 'encode Some(EncodeError::JsonError(e));
                     }
 
-                    buffer.push_str("\":");
-
-                    if let Err(e) = serde_json::to_writer(unsafe { buffer.as_mut_vec() }, value) {
-                        buffer.truncate(pos); // revert back to previous element
-                        break Err(e.into());
+                    if this.buffer.len() >= (1024 * 8) {
+                        return Poll::Ready(Some(Ok(Frame::data(Bytes::from(mem::take(this.buffer))))));
                     }
-
-                    first = false;
                 }
-                Some(Err(e)) => break Err(e.into()),
-                None => break Ok(()),
+
+                None
+            };
+
+            match res {
+                Some(EncodeError::ItemError(e)) => log::error!("Error sending JSON map stream: {e}"),
+                Some(EncodeError::JsonError(e)) => log::error!("Error encoding JSON map stream: {e}"),
+                _ => {}
             }
 
-            // Flush buffer at 8KiB
-            if buffer.len() >= (1024 * 8) {
-                let chunk = Bytes::from(std::mem::take(&mut buffer));
-                if let Err(e) = sender.send(Ok(Frame::data(chunk))).await {
-                    log::error!("Error sending JSON map chunk: {e}");
-                    if !sender.abort().await {
-                        log::error!("Error aborting JSON stream");
-                    }
-                    return;
-                }
-            }
-        };
+            this.buffer.push_str("}");
+            *this.state = State::Done;
 
-        buffer.push('}');
-        if let Err(e) = sender.send(Ok(Frame::data(buffer.into()))).await {
-            log::error!("Error sending JSON map chunk: {e}");
-            if !sender.abort().await {
-                log::error!("Error aborting JSON stream");
-            }
-            return;
+            Poll::Ready(Some(Ok(Frame::data(Bytes::from(mem::take(this.buffer))))))
         }
-
-        if let Err(e) = error {
-            log::error!("Error serializing json map: {e}");
-        }
-    });
-
-    JsonStream { body }
+    }
 }
 
-pub fn array_stream<T, E>(stream: impl Stream<Item = Result<T, E>> + Send + 'static) -> impl Reply
+#[must_use]
+pub fn array_stream<S, T, E>(stream: S) -> impl Reply
 where
+    S: Stream<Item = Result<T, E>> + Send + 'static,
     T: serde::Serialize + Send + Sync + 'static,
-    E: Into<DynError> + Send + Sync + 'static,
+    E: std::error::Error,
 {
-    let (body, sender) = Body::channel(16);
+    return Body::Dyn(Box::pin(JsonArrayBody {
+        state: State::New,
+        buffer: Vec::new(),
+        stream,
+    }))
+    .with_header(ContentType::json());
 
-    tokio::spawn(async move {
-        let mut stream = std::pin::pin!(stream);
+    impl<S, T, E> hyper::body::Body for JsonArrayBody<S>
+    where
+        S: Stream<Item = Result<T, E>> + Send + 'static,
+        T: serde::Serialize + Send + Sync + 'static,
+        E: std::error::Error,
+    {
+        type Data = Bytes;
+        type Error = Error;
 
-        let mut first = true;
-        let mut buffer = Vec::with_capacity(128);
-        buffer.push(b'[');
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            let mut this = self.project();
 
-        let error: Result<(), DynError> = loop {
-            match stream.next().await {
-                Some(Ok(ref value)) => {
-                    let pos = buffer.len();
-
-                    if !first {
-                        buffer.push(b',');
-                    }
-
-                    if let Err(e) = serde_json::to_writer(&mut buffer, value) {
-                        buffer.truncate(pos); // revert back to previous element
-                        break Err(e.into());
-                    }
-
-                    first = false;
+            match this.state {
+                State::New => {
+                    this.buffer.reserve(128);
+                    this.buffer.push(b'[');
+                    *this.state = State::First;
                 }
-                Some(Err(e)) => break Err(e.into()),
-                None => break Ok(()),
+                State::Done => return Poll::Ready(None),
+                _ => {}
             }
 
-            // Flush buffer at 8KiB
-            if buffer.len() >= (1024 * 8) {
-                let chunk = Bytes::from(std::mem::take(&mut buffer));
-                if let Err(e) = sender.send(Ok(Frame::data(chunk))).await {
-                    log::error!("Error sending JSON array chunk: {e}");
-                    if !sender.abort().await {
-                        log::error!("Error aborting JSON stream");
+            let res: Option<EncodeError<E>> = 'encode: {
+                while let Some(item) = futures::ready!(this.stream.poll_next_unpin(cx)) {
+                    let item = match item {
+                        Ok(item) => item,
+                        Err(e) => break 'encode Some(EncodeError::ItemError(e)),
+                    };
+
+                    let pos = this.buffer.len();
+
+                    if let State::First = *this.state {
+                        this.buffer.push(b',');
+                        *this.state = State::Running;
                     }
-                    return;
+
+                    if let Err(e) = serde_json::to_writer(&mut this.buffer, &item) {
+                        this.buffer.truncate(pos); // revert back to previous element
+                        break 'encode Some(EncodeError::JsonError(e));
+                    }
+
+                    if this.buffer.len() >= (1024 * 8) {
+                        return Poll::Ready(Some(Ok(Frame::data(Bytes::from(mem::take(this.buffer))))));
+                    }
                 }
+
+                None
+            };
+
+            match res {
+                Some(EncodeError::ItemError(e)) => log::error!("Error sending JSON array stream: {e}"),
+                Some(EncodeError::JsonError(e)) => log::error!("Error encoding JSON array stream: {e}"),
+                _ => {}
             }
-        };
 
-        buffer.push(b']');
-        if let Err(e) = sender.send(Ok(Frame::data(buffer.into()))).await {
-            log::error!("Error sending JSON array chunk: {e}");
-            if !sender.abort().await {
-                log::error!("Error aborting JSON stream");
-            }
-            return;
+            this.buffer.push(b']');
+            *this.state = State::Done;
+
+            Poll::Ready(Some(Ok(Frame::data(Bytes::from(mem::take(this.buffer))))))
         }
-
-        if let Err(e) = error {
-            log::error!("Error serializing json array: {e}");
-        }
-    });
-
-    JsonStream { body }
-}
-
-impl Reply for JsonStream {
-    #[inline]
-    fn into_response(self) -> Response {
-        Response::new(self.body)
-            .with_header(ContentType::json())
-            .into_response()
     }
 }
