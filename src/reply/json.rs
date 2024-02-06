@@ -85,11 +85,11 @@ where
     T: serde::Serialize + Send + Sync + 'static,
     E: std::error::Error,
 {
-    return Body::Dyn(Box::pin(JsonMapBody {
+    return Body::wrap(JsonMapBody {
         state: State::New,
         buffer: String::new(),
         stream,
-    }))
+    })
     .with_header(ContentType::json());
 
     impl<S, K, T, E> hyper::body::Body for JsonMapBody<S>
@@ -172,11 +172,11 @@ where
     T: serde::Serialize + Send + Sync + 'static,
     E: std::error::Error,
 {
-    return Body::Dyn(Box::pin(JsonArrayBody {
+    return Body::wrap(JsonArrayBody {
         state: State::New,
         buffer: Vec::new(),
         stream,
-    }))
+    })
     .with_header(ContentType::json());
 
     impl<S, T, E> hyper::body::Body for JsonArrayBody<S>

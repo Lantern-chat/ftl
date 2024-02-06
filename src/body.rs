@@ -1,3 +1,5 @@
+#![allow(clippy::type_complexity)]
+
 use std::marker::PhantomData;
 
 use bytes::{Buf, Bytes};
@@ -27,16 +29,25 @@ impl Reply for Body {
 }
 
 #[derive(Default)]
+pub struct Body(BodyInner);
+
+#[derive(Default)]
 #[pin_project::pin_project(project = BodyProj)]
-pub enum Body {
+enum BodyInner {
     #[default]
     Empty,
     Full(#[pin] Full<Bytes>),
-    Stream(#[pin] StreamBody<ReceiverStream<Result<Frame<Bytes>, Error>>>),
-    // DynStream(#[pin] StreamBody<Box<dyn futures::Stream<Item = Result<Frame<Bytes>, Error>> + 'static>>),
-    //Buf(#[pin] Full<Box<dyn Buf + 'static>>),
-    Dyn(#[pin] Pin<Box<dyn HttpBody<Data = Bytes, Error = Error> + 'static>>),
+    Channel(#[pin] StreamBody<ReceiverStream<Result<Frame<Bytes>, Error>>>),
+    Stream(#[pin] StreamBody<futures::stream::BoxStream<'static, Result<Frame<Bytes>, Error>>>),
+    //Buf(#[pin] Full<Pin<Box<dyn Buf + Send + 'static>>>),
+    Dyn(#[pin] Pin<Box<dyn HttpBody<Data = Bytes, Error = Error> + Send + 'static>>),
 }
+
+// assert Send
+const _: () = {
+    const fn test_send<T: Send>() {}
+    test_send::<Body>();
+};
 
 use std::{
     pin::Pin,
@@ -47,6 +58,29 @@ impl HttpBody for Body {
     type Data = Bytes;
     type Error = Error;
 
+    #[inline]
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        Pin::new(&mut self.get_mut().0).poll_frame(cx)
+    }
+
+    #[inline]
+    fn is_end_stream(&self) -> bool {
+        self.0.is_end_stream()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> hyper::body::SizeHint {
+        self.0.size_hint()
+    }
+}
+
+impl HttpBody for BodyInner {
+    type Data = Bytes;
+    type Error = Error;
+
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -54,63 +88,85 @@ impl HttpBody for Body {
         match self.project() {
             BodyProj::Empty => Poll::Ready(None),
             BodyProj::Full(full) => full.poll_frame(cx).map_err(|_| unreachable!()),
+            //BodyProj::Buf(buf) => buf.poll_frame(cx).map_err(|_| unreachable!()),
+            BodyProj::Channel(stream) => stream.poll_frame(cx),
             BodyProj::Stream(stream) => stream.poll_frame(cx),
-            // BodyProj::DynStream(stream) => stream.poll_frame(cx),
             BodyProj::Dyn(body) => body.poll_frame(cx),
         }
     }
 
     fn is_end_stream(&self) -> bool {
         match self {
-            Body::Empty => true,
-            Body::Full(inner) => inner.is_end_stream(),
-            Body::Stream(inner) => inner.is_end_stream(),
-            // Body::DynStream(inner) => inner.is_end_stream(),
-            Body::Dyn(inner) => inner.is_end_stream(),
+            Self::Empty => true,
+            Self::Full(inner) => inner.is_end_stream(),
+            Self::Channel(inner) => inner.is_end_stream(),
+            Self::Stream(inner) => inner.is_end_stream(),
+            Self::Dyn(inner) => inner.is_end_stream(),
         }
     }
 
     fn size_hint(&self) -> hyper::body::SizeHint {
         match self {
-            Body::Empty => hyper::body::SizeHint::new(),
-            Body::Full(inner) => inner.size_hint(),
-            Body::Stream(inner) => inner.size_hint(),
-            // Body::DynStream(inner) => inner.size_hint(),
-            Body::Dyn(inner) => inner.size_hint(),
+            Self::Empty => hyper::body::SizeHint::new(),
+            Self::Full(inner) => inner.size_hint(),
+            Self::Channel(inner) => inner.size_hint(),
+            Self::Stream(inner) => inner.size_hint(),
+            Self::Dyn(inner) => inner.size_hint(),
         }
     }
 }
 
 impl From<Bytes> for Body {
+    #[inline]
     fn from(value: Bytes) -> Self {
-        Body::Full(Full::new(value))
+        Body(BodyInner::Full(Full::new(value)))
+    }
+}
+
+impl From<Vec<u8>> for Body {
+    #[inline]
+    fn from(value: Vec<u8>) -> Self {
+        Bytes::from(value).into()
     }
 }
 
 impl From<String> for Body {
+    #[inline]
     fn from(value: String) -> Self {
         Bytes::from(value).into()
     }
 }
 
 impl Body {
+    pub const fn empty() -> Body {
+        Body(BodyInner::Empty)
+    }
+
+    /// Create a new bounded channel with the given capacity where
+    /// the receiver will forward given frames to the HTTP Body.
     pub fn channel(capacity: usize) -> (Self, BodySender) {
         let (tx, rx) = mpsc::channel::<Result<Frame<Bytes>, Error>>(capacity);
 
         (
-            Body::Stream(StreamBody::new(ReceiverStream::new(rx))),
+            Body(BodyInner::Channel(StreamBody::new(ReceiverStream::new(rx)))),
             BodySender(tx),
         )
     }
 
-    pub fn wrap_stream() {}
+    /// Creates an HTTP Body by wrapping a Stream of byte frames.
+    pub fn stream<S>(stream: S) -> Body
+    where
+        S: futures::Stream<Item = Result<Frame<Bytes>, Error>> + Send + 'static,
+    {
+        Body(BodyInner::Stream(StreamBody::new(Box::pin(stream))))
+    }
 
-    // pub fn stream<S>(stream: S) -> Body
-    // where
-    //     S: futures::Stream<Item = Result<Frame<Bytes>, Error>> + 'static,
-    // {
-    //     Body::DynStream(StreamBody::new(Box::new(stream)))
-    // }
+    pub fn wrap<B>(body: B) -> Body
+    where
+        B: HttpBody<Data = Bytes, Error = Error> + Send + 'static,
+    {
+        Body(BodyInner::Dyn(Box::pin(body)))
+    }
 }
 
 pub struct BodySender(mpsc::Sender<Result<Frame<Bytes>, Error>>);
@@ -125,6 +181,7 @@ impl std::ops::Deref for BodySender {
 }
 
 impl BodySender {
+    /// Aborts the body stream with an [`Error::StreamAborted`] error
     pub async fn abort(self) -> bool {
         self.send(Err(Error::StreamAborted)).await.is_ok()
     }

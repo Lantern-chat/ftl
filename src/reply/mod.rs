@@ -13,8 +13,8 @@ pub mod json;
 #[cfg(feature = "json")]
 pub use json::{json, Json};
 
-#[cfg(feature = "msgpack")]
-pub mod msgpack;
+// #[cfg(feature = "msgpack")]
+// pub mod msgpack;
 
 #[cfg(feature = "cbor")]
 pub mod cbor;
@@ -135,7 +135,7 @@ impl Reply for Response {
 impl Reply for StatusCode {
     #[inline]
     fn into_response(self) -> Response {
-        let mut res = Response::new(Body::Empty);
+        let mut res = Response::new(Body::empty());
         *res.status_mut() = self;
         res
     }

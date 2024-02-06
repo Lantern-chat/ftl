@@ -41,7 +41,7 @@ impl Reply for Cbor {
                 .with_header(crate::body::APPLICATION_CBOR.clone())
                 .into_response(),
 
-            Err(()) => Response::new(Body::Empty)
+            Err(()) => Response::new(Body::empty())
                 .with_status(StatusCode::INTERNAL_SERVER_ERROR)
                 .into_response(),
         }
@@ -68,10 +68,10 @@ where
     T: serde::Serialize + Send + Sync + 'static,
     E: std::error::Error,
 {
-    return Body::Dyn(Box::pin(CborArrayBody {
+    return Body::wrap(CborArrayBody {
         buffer: Vec::new(),
         stream,
-    }))
+    })
     .with_header(APPLICATION_CBOR.clone());
 
     impl<S, T, E> hyper::body::Body for CborArrayBody<S>
