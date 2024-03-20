@@ -13,9 +13,6 @@ pub mod json;
 #[cfg(feature = "json")]
 pub use json::{json, Json};
 
-// #[cfg(feature = "msgpack")]
-// pub mod msgpack;
-
 #[cfg(feature = "cbor")]
 pub mod cbor;
 

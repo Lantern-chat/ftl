@@ -195,7 +195,6 @@ where
     enum BodyType {
         Json,
         FormUrlEncoded,
-        MsgPack,
         Cbor,
     }
 
@@ -204,8 +203,6 @@ where
             BodyType::Json
         } else if ct == ContentType::form_url_encoded() {
             BodyType::FormUrlEncoded
-        } else if ct == ContentType::from(mime::APPLICATION_MSGPACK) {
-            BodyType::MsgPack
         } else if ct == *APPLICATION_CBOR {
             BodyType::Cbor
         } else {
@@ -222,9 +219,6 @@ where
         BodyType::Json => serde_json::from_reader(reader)?,
 
         BodyType::FormUrlEncoded => serde_urlencoded::from_reader(reader)?,
-
-        #[cfg(feature = "msgpack")]
-        BodyType::MsgPack => rmp_serde::from_read(reader)?,
 
         #[cfg(feature = "cbor")]
         BodyType::Cbor => ciborium::de::from_reader(reader)?,
@@ -245,10 +239,6 @@ pub enum BodyDeserializeError {
 
     #[error("Form Parse Error: {0}")]
     Form(#[from] serde_urlencoded::de::Error),
-
-    #[cfg(feature = "msgpack")]
-    #[error("MsgPack Parse Error: {0}")]
-    MsgPack(#[from] rmp_serde::decode::Error),
 
     #[cfg(feature = "cbor")]
     #[error("CBOR Parse Error: {0}")]
@@ -311,21 +301,6 @@ where
     let body = route.collect().await?.aggregate();
 
     Ok(serde_urlencoded::from_reader(body.reader())?)
-}
-
-#[cfg(feature = "msgpack")]
-pub async fn msgpack<T, S>(route: &mut Route<S>) -> Result<T, BodyDeserializeError>
-where
-    T: DeserializeOwned,
-{
-    match route.header::<ContentType>() {
-        Some(ct) if ct == ContentType::from(mime::APPLICATION_MSGPACK) => {}
-        _ => return Err(BodyDeserializeError::IncorrectContentType),
-    }
-
-    let body = route.collect().await?.aggregate();
-
-    Ok(rmp_serde::from_read(body.reader())?)
 }
 
 #[cfg(feature = "cbor")]
