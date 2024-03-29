@@ -154,12 +154,11 @@ impl Gcra {
         let mut prev = self.0.load(Ordering::Acquire);
 
         loop {
-            match Self::decide(prev, now, quota) {
-                Err(err) => return Err(err),
-                Ok(next) => match self.0.compare_exchange_weak(prev, next, Ordering::Release, Ordering::Relaxed) {
-                    Ok(_) => return Ok(()),
-                    Err(next_prev) => prev = next_prev,
-                },
+            let next = Self::decide(prev, now, quota)?;
+
+            match self.0.compare_exchange_weak(prev, next, Ordering::Release, Ordering::Relaxed) {
+                Ok(_) => return Ok(()),
+                Err(next_prev) => prev = next_prev,
             }
         }
     }
