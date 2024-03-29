@@ -122,6 +122,9 @@ impl Quota {
     }
 }
 
+/// Generic Cell Rate Algorithm (GCRA) implementation.
+///
+/// Uses a single atomic value to store the next time a request can be made.
 #[derive(Debug)]
 #[repr(transparent)]
 pub struct Gcra(AtomicU64);
