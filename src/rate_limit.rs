@@ -76,9 +76,9 @@ where
 
 /// An error that occurs when a rate limit is exceeded,
 /// with the amount of time until the next request can be made.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
-pub struct RateLimitError(NonZeroU64);
+pub struct RateLimitError(pub NonZeroU64);
 
 impl RateLimitError {
     /// Returns the amount of time until the next request can be made as a `Duration`.
