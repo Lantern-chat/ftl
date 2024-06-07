@@ -16,7 +16,7 @@ tokio-util = { version = "0.7", features = ["io"] }
 tokio-stream = "0.1.14"
 
 hyper = { version = "1", features = ["http1", "http2", "server"] }
-tokio-tungstenite = "0.21"
+tokio-tungstenite = "0.23"
 http = "1"
 hyper-util = { version = "0.1.2", features = ["tokio"] }
 http-body-util = "0.1.0"
