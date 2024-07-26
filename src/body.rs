@@ -1,6 +1,7 @@
 #![allow(clippy::type_complexity)]
 
 use std::marker::PhantomData;
+use std::sync::LazyLock;
 
 use bytes::{Buf, Bytes};
 use headers::ContentType;
@@ -11,9 +12,8 @@ use tokio::sync::mpsc;
 
 use super::{BodyError, Error, Reply, Route};
 
-lazy_static::lazy_static! {
-    pub static ref APPLICATION_CBOR: ContentType = ContentType::from("application/cbor".parse::<mime::Mime>().unwrap());
-}
+pub static APPLICATION_CBOR: LazyLock<ContentType> =
+    LazyLock::new(|| ContentType::from("application/cbor".parse::<mime::Mime>().unwrap()));
 
 use http_body_util::{Full, StreamBody};
 
